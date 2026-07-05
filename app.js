@@ -12,7 +12,17 @@ const store = {
 };
 
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
-const GROQ_MODEL = 'groq/compound'; // has built-in web search, decides on its own when to use it
+const DEFAULT_MODEL = 'llama-3.3-70b-versatile';   // fast, reliable, generous free quota
+const SEARCH_MODEL = 'groq/compound';               // has web search, but a much smaller free daily quota
+
+// Only route to the (rate-limited) search model when the message clearly
+// calls for current/real-world information — keeps everyday chat fast and
+// within the generous default quota.
+const NEWS_PATTERN = /\b(news|headline|current event|what'?s happening|happening (today|now)|latest|this morning|this week|yesterday|today'?s date|who won|the score|weather (today|right now)|election|breaking|stock price|what year|current president|current prime minister)\b/i;
+
+function pickModel(text){
+  return NEWS_PATTERN.test(text) ? SEARCH_MODEL : DEFAULT_MODEL;
+}
 
 function systemPrompt(){
   const topic = store.topic.trim();
@@ -20,8 +30,9 @@ function systemPrompt(){
     `Talk about everyday life, ask natural follow-up questions, react like a real person (curiosity, humor, small opinions). ` +
     `Keep replies SHORT — 1 to 3 sentences, like real speech, never a lecture. ` +
     `You have access to real-time web search — if the user asks about news, current events, ` +
-    `today's date, sports results, or any fact you're unsure about, look it up and answer naturally, ` +
+    `today's date, sports results, or any fact you're unsure about, use it and answer naturally, ` +
     `still in a short spoken style, not like reading a list of headlines. ` +
+    `If you're ever not sure whether your information is current, say so honestly instead of guessing. ` +
     `Do not mention that you are an AI. Do not use markdown, lists, or emojis — plain spoken sentences only. ` +
     `If the user makes a grammar or word-choice mistake, don't interrupt the flow to correct it every time — occasionally, naturally, ` +
     `weave the correct form back into your own reply the way a friend would, without explicitly pointing it out unless they ask for help. ` +
@@ -309,6 +320,9 @@ async function callGroq(){
   }
   const messages = [{ role: 'system', content: systemPrompt() }, ...convo];
 
+  const lastUser = [...convo].reverse().find(m => m.role === 'user');
+  const model = pickModel(lastUser ? lastUser.content : '');
+
   const res = await fetch(GROQ_URL, {
     method: 'POST',
     headers: {
@@ -316,7 +330,7 @@ async function callGroq(){
       'Authorization': `Bearer ${store.key}`,
     },
     body: JSON.stringify({
-      model: GROQ_MODEL,
+      model,
       messages,
       max_completion_tokens: 220,
       temperature: 0.8,
@@ -326,9 +340,36 @@ async function callGroq(){
   if (!res.ok){
     let detail = '';
     try{ const errBody = await res.json(); detail = errBody?.error?.message || ''; }catch(e){}
+
+    // If the search model is rate-limited, fall back to the reliable
+    // default model rather than ending the conversation.
+    if (res.status === 429 && model === SEARCH_MODEL){
+      return callGroqWithModel(messages, DEFAULT_MODEL);
+    }
+
     if (res.status === 401) throw new Error('Invalid API key');
     if (res.status === 429) throw new Error('Rate limit reached, wait a moment');
     throw new Error('Groq error ' + res.status + (detail ? ': ' + detail : ''));
+  }
+  const data = await res.json();
+  const content = data?.choices?.[0]?.message?.content;
+  if (!content) throw new Error('Empty response from Groq');
+  return content.trim();
+}
+
+async function callGroqWithModel(messages, model){
+  const res = await fetch(GROQ_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${store.key}`,
+    },
+    body: JSON.stringify({ model, messages, max_completion_tokens: 220, temperature: 0.8 }),
+  });
+  if (!res.ok){
+    if (res.status === 401) throw new Error('Invalid API key');
+    if (res.status === 429) throw new Error('Rate limit reached, wait a moment');
+    throw new Error('Groq error ' + res.status);
   }
   const data = await res.json();
   const content = data?.choices?.[0]?.message?.content;
