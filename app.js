@@ -301,7 +301,13 @@ async function callGroq(){
   if (!store.key){
     throw new Error('Add your Groq API key in settings');
   }
-  const messages = [{ role: 'system', content: systemPrompt() }, ...history.slice(-16)];
+  const convo = history.slice(-16);
+  if (convo.length === 0){
+    // Groq requires the last message to be role 'user'. This kickoff line
+    // is never shown or saved — it just triggers the AI's opening line.
+    convo.push({ role: 'user', content: '(Start the conversation with your opener.)' });
+  }
+  const messages = [{ role: 'system', content: systemPrompt() }, ...convo];
 
   const res = await fetch(GROQ_URL, {
     method: 'POST',
