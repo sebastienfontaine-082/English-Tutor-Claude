@@ -199,7 +199,7 @@ let sessionActive = false;
 function buildRecognition(){
   const r = new SR();
   r.lang = 'en-US';
-  r.continuous = true;
+  r.continuous = false;
   r.interimResults = true;
   r.maxAlternatives = 1;
   return r;
@@ -226,67 +226,62 @@ function setState(s){
 
 function listen(){
   if (!sessionActive) return;
-  recognition = buildRecognition();
-  let finalText = '';
-  let interimText = '';
-  let silenceTimer = null;
 
-  function currentText(){
-    return (finalText + ' ' + interimText).trim();
-  }
+  let accumulated = '';
+  let lastSpeechTime = Date.now();
 
-  function scheduleFinalize(){
-    clearTimeout(silenceTimer);
-    silenceTimer = setTimeout(() => {
-      const text = currentText();
-      if (text){
-        try{ recognition.stop(); }catch(e){}
-        handleUserUtterance(text);
+  function startChunk(){
+    if (!sessionActive) return;
+    recognition = buildRecognition();
+
+    recognition.onstart = () => setState('listening');
+
+    recognition.onresult = (e) => {
+      let interim = '', finalPiece = '';
+      for (let i = e.resultIndex; i < e.results.length; i++){
+        const t = e.results[i][0].transcript;
+        if (e.results[i].isFinal) finalPiece += t; else interim += t;
       }
-    }, SILENCE_MS);
+      if (finalPiece.trim() || interim.trim()) lastSpeechTime = Date.now();
+      if (finalPiece.trim()) accumulated = (accumulated + ' ' + finalPiece).trim();
+      captionEl.textContent = (accumulated + ' ' + interim).trim();
+    };
+
+    recognition.onerror = (e) => {
+      if (e.error === 'not-allowed' || e.error === 'service-not-allowed'){
+        statusEl.textContent = 'Microphone access denied';
+        endSession();
+        return;
+      }
+      if (e.error !== 'no-speech' && e.error !== 'aborted'){
+        console.warn('SpeechRecognition error:', e.error);
+      }
+      // onend fires right after onerror in all these cases — let it decide
+      // whether to finalize or start the next chunk.
+    };
+
+    recognition.onend = () => {
+      if (!sessionActive || vizState !== 'listening') return;
+      const silentFor = Date.now() - lastSpeechTime;
+      if (accumulated.trim() && silentFor >= SILENCE_MS){
+        const text = accumulated.trim();
+        accumulated = '';
+        handleUserUtterance(text);
+      } else {
+        // Either mid-utterance pause (short native gap) or nothing said
+        // yet — start the next short chunk to keep listening.
+        startChunk();
+      }
+    };
+
+    try{ recognition.start(); }catch(e){ /* already running, ignore */ }
   }
 
-  recognition.onstart = () => setState('listening');
-
-  recognition.onresult = (e) => {
-    finalText = ''; interimText = '';
-    for (let i = 0; i < e.results.length; i++){
-      const t = e.results[i][0].transcript;
-      if (e.results[i].isFinal) finalText += t; else interimText += t;
-    }
-    captionEl.textContent = currentText();
-    scheduleFinalize();
-  };
-
-  recognition.onerror = (e) => {
-    if (e.error === 'not-allowed' || e.error === 'service-not-allowed'){
-      statusEl.textContent = 'Microphone access denied';
-      endSession();
-      return;
-    }
-    if (e.error !== 'no-speech' && e.error !== 'aborted'){
-      console.warn('SpeechRecognition error:', e.error);
-    }
-    // Only auto-restart if we're still meant to be listening (avoid
-    // interfering with the thinking/speaking states triggered elsewhere).
-    if (sessionActive && vizState === 'listening') listen();
-  };
-
-  recognition.onend = () => {
-    clearTimeout(silenceTimer);
-    if (!sessionActive || vizState !== 'listening') return;
-    const text = currentText();
-    if (text){
-      handleUserUtterance(text);
-    } else {
-      listen();
-    }
-  };
-
-  try{ recognition.start(); }catch(e){ /* already started, ignore */ }
+  startChunk();
 }
 
 async function handleUserUtterance(text){
+  if (text.length > 1000) text = text.slice(0, 1000); // safety cap, avoids oversized requests
   setState('thinking');
   history.push({ role: 'user', content: text });
   saveHistory();
