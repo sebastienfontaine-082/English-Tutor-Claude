@@ -185,11 +185,15 @@ let sessionActive = false;
 function buildRecognition(){
   const r = new SR();
   r.lang = 'en-US';
-  r.continuous = false;
+  r.continuous = true;
   r.interimResults = true;
   r.maxAlternatives = 1;
   return r;
 }
+
+// How long a silence has to last before we consider the user done talking.
+// Generous on purpose — tolerates hesitation, "uhh", searching for a word, etc.
+const SILENCE_MS = 2200;
 
 function setState(s){
   vizState = s;
@@ -209,22 +213,35 @@ function setState(s){
 function listen(){
   if (!sessionActive) return;
   recognition = buildRecognition();
-  let lastInterim = '';
+  let finalText = '';
+  let interimText = '';
+  let silenceTimer = null;
+
+  function currentText(){
+    return (finalText + ' ' + interimText).trim();
+  }
+
+  function scheduleFinalize(){
+    clearTimeout(silenceTimer);
+    silenceTimer = setTimeout(() => {
+      const text = currentText();
+      if (text){
+        try{ recognition.stop(); }catch(e){}
+        handleUserUtterance(text);
+      }
+    }, SILENCE_MS);
+  }
 
   recognition.onstart = () => setState('listening');
 
   recognition.onresult = (e) => {
-    let interim = '', final = '';
-    for (let i = e.resultIndex; i < e.results.length; i++){
+    finalText = ''; interimText = '';
+    for (let i = 0; i < e.results.length; i++){
       const t = e.results[i][0].transcript;
-      if (e.results[i].isFinal) final += t; else interim += t;
+      if (e.results[i].isFinal) finalText += t; else interimText += t;
     }
-    if (interim.trim()) lastInterim = interim;
-    captionEl.textContent = final || interim;
-    if (final.trim()){
-      recognition.stop();
-      handleUserUtterance(final.trim());
-    }
+    captionEl.textContent = currentText();
+    scheduleFinalize();
   };
 
   recognition.onerror = (e) => {
@@ -235,7 +252,6 @@ function listen(){
     }
     if (e.error !== 'no-speech' && e.error !== 'aborted'){
       console.warn('SpeechRecognition error:', e.error);
-      captionEl.textContent = `(mic hiccup: ${e.error}, retrying…)`;
     }
     // Only auto-restart if we're still meant to be listening (avoid
     // interfering with the thinking/speaking states triggered elsewhere).
@@ -243,13 +259,10 @@ function listen(){
   };
 
   recognition.onend = () => {
+    clearTimeout(silenceTimer);
     if (!sessionActive || vizState !== 'listening') return;
-    // Chrome on Android sometimes ends recognition without ever marking
-    // a result as final. If we captured interim speech, use it instead
-    // of silently restarting forever.
-    if (lastInterim.trim()){
-      const text = lastInterim.trim();
-      lastInterim = '';
+    const text = currentText();
+    if (text){
       handleUserUtterance(text);
     } else {
       listen();
