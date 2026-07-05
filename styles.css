@@ -121,7 +121,8 @@ html, body{
   text-align: center;
   font-size: 15px;
   color: var(--text);
-  min-height: 40px;
+  height: 76px;
+  overflow: hidden;
   line-height: 1.4;
   z-index: 2;
   opacity: 0.9;

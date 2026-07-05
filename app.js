@@ -57,6 +57,13 @@ const btnLabel = document.getElementById('btnLabel');
 const stopBtn = document.getElementById('stopBtn');
 const statusEl = document.getElementById('status');
 const captionEl = document.getElementById('caption');
+
+// Keeps the caption's visual height roughly constant (shows the tail of
+// long text) so a growing transcript never pushes the orb around.
+function setCaption(text){
+  const MAX_CHARS = 170;
+  captionEl.textContent = text.length > MAX_CHARS ? '… ' + text.slice(-MAX_CHARS) : text;
+}
 const settingsBtn = document.getElementById('settingsBtn');
 const settingsPanel = document.getElementById('settingsPanel');
 const closeSettingsBtn = document.getElementById('closeSettingsBtn');
@@ -237,14 +244,19 @@ function listen(){
     recognition.onstart = () => setState('listening');
 
     recognition.onresult = (e) => {
-      let interim = '', finalPiece = '';
-      for (let i = e.resultIndex; i < e.results.length; i++){
-        const t = e.results[i][0].transcript;
-        if (e.results[i].isFinal) finalPiece += t; else interim += t;
+      // Android sometimes emits several result entries that are each
+      // already cumulative (not incremental deltas) — summing them all
+      // together doubles/repeats text. Only the LAST entry matters.
+      const last = e.results[e.results.length - 1];
+      const t = last[0].transcript;
+      if (t.trim()) lastSpeechTime = Date.now();
+
+      if (last.isFinal){
+        if (t.trim()) accumulated = (accumulated + ' ' + t).trim();
+        setCaption(accumulated);
+      } else {
+        setCaption((accumulated + ' ' + t).trim());
       }
-      if (finalPiece.trim() || interim.trim()) lastSpeechTime = Date.now();
-      if (finalPiece.trim()) accumulated = (accumulated + ' ' + finalPiece).trim();
-      captionEl.textContent = (accumulated + ' ' + interim).trim();
     };
 
     recognition.onerror = (e) => {
@@ -390,7 +402,7 @@ function speakRaw(text){
 
 async function speak(text){
   setState('speaking');
-  captionEl.textContent = text;
+  setCaption(text);
   await speakRaw(text);
   if (sessionActive) listen();
   else setState('idle');
