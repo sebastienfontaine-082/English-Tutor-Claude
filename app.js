@@ -288,6 +288,7 @@ async function handleUserUtterance(text){
   }catch(err){
     console.error(err);
     statusEl.textContent = err.message || 'Connection error';
+    captionEl.textContent = '⚠ ' + (err.message || 'Connection error');
     setState('idle');
     sessionActive = false;
     toggleSessionUI(false);
@@ -311,18 +312,22 @@ async function callGroq(){
     body: JSON.stringify({
       model: GROQ_MODEL,
       messages,
-      max_tokens: 220,
+      max_completion_tokens: 220,
       temperature: 0.8,
     }),
   });
 
   if (!res.ok){
+    let detail = '';
+    try{ const errBody = await res.json(); detail = errBody?.error?.message || ''; }catch(e){}
     if (res.status === 401) throw new Error('Invalid API key');
     if (res.status === 429) throw new Error('Rate limit reached, wait a moment');
-    throw new Error('Groq error ' + res.status);
+    throw new Error('Groq error ' + res.status + (detail ? ': ' + detail : ''));
   }
   const data = await res.json();
-  return data.choices[0].message.content.trim();
+  const content = data?.choices?.[0]?.message?.content;
+  if (!content) throw new Error('Empty response from Groq');
+  return content.trim();
 }
 
 /* ---------- Speech synthesis ---------- */
@@ -394,6 +399,7 @@ async function startSession(){
       speak(reply);
     }catch(err){
       statusEl.textContent = err.message;
+      captionEl.textContent = '⚠ ' + err.message;
       sessionActive = false;
       toggleSessionUI(false);
       setState('idle');
