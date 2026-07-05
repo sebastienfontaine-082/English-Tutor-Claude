@@ -105,7 +105,6 @@ const canvas = document.getElementById('orbCanvas');
 const ctx = canvas.getContext('2d');
 const BARS = 48;
 let animFrame = null;
-let audioCtx, analyser, micSource, dataArray;
 let vizState = 'idle'; // idle | listening | thinking | speaking
 let phase = 0;
 
@@ -131,11 +130,13 @@ function drawOrb(){
 
   let levels = new Array(BARS).fill(0.08);
 
-  if (vizState === 'listening' && analyser){
-    analyser.getByteFrequencyData(dataArray);
-    const step = Math.floor(dataArray.length / BARS);
+  if (vizState === 'listening'){
+    // Synthetic "alive" pulse — intentionally NOT reading real mic amplitude
+    // here anymore, since holding our own mic stream open at the same time
+    // as SpeechRecognition was starving it of audio on some Android devices.
+    phase += 0.11;
     for (let i=0;i<BARS;i++){
-      levels[i] = Math.min(1, (dataArray[i*step]/255) * 1.6 + 0.06);
+      levels[i] = 0.15 + 0.35*Math.abs(Math.sin(phase*1.3 + i*0.9)) * (0.6 + 0.4*Math.random());
     }
   } else if (vizState === 'thinking'){
     phase += 0.06;
@@ -175,26 +176,11 @@ function drawOrb(){
   animFrame = requestAnimationFrame(drawOrb);
 }
 
-async function startMicAnalyser(stream){
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  analyser = audioCtx.createAnalyser();
-  analyser.fftSize = 128;
-  dataArray = new Uint8Array(analyser.frequencyBinCount);
-  micSource = audioCtx.createMediaStreamSource(stream);
-  micSource.connect(analyser);
-}
-function stopMicAnalyser(){
-  if (micSource) try{ micSource.disconnect(); }catch(e){}
-  if (audioCtx) try{ audioCtx.close(); }catch(e){}
-  audioCtx = null; analyser = null; micSource = null;
-}
-
 /* ---------- Speech recognition ---------- */
 
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 let recognition = null;
 let sessionActive = false;
-let micStream = null;
 
 function buildRecognition(){
   const r = new SR();
@@ -363,14 +349,11 @@ async function startSession(){
     return;
   }
   try{
-    micStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false,
-      }
-    });
-    await startMicAnalyser(micStream);
+    // Request permission, then immediately release the stream — we don't
+    // keep it open, so it can't compete with SpeechRecognition's own mic
+    // access (which was silently starving recognition of audio before).
+    const permStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    permStream.getTracks().forEach(t => t.stop());
   }catch(e){
     statusEl.textContent = 'Microphone access denied';
     return;
@@ -409,8 +392,6 @@ function endSession(){
   toggleSessionUI(false);
   if (recognition) try{ recognition.stop(); }catch(e){}
   speechSynthesis.cancel();
-  stopMicAnalyser();
-  if (micStream) micStream.getTracks().forEach(t => t.stop());
   setState('idle');
 }
 
