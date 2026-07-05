@@ -12,13 +12,16 @@ const store = {
 };
 
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
-const GROQ_MODEL = 'llama-3.3-70b-versatile';
+const GROQ_MODEL = 'groq/compound'; // has built-in web search, decides on its own when to use it
 
 function systemPrompt(){
   const topic = store.topic.trim();
   return `You are a warm, casual native English speaker having a real spoken conversation with someone practicing English. ` +
     `Talk about everyday life, ask natural follow-up questions, react like a real person (curiosity, humor, small opinions). ` +
     `Keep replies SHORT — 1 to 3 sentences, like real speech, never a lecture. ` +
+    `You have access to real-time web search — if the user asks about news, current events, ` +
+    `today's date, sports results, or any fact you're unsure about, look it up and answer naturally, ` +
+    `still in a short spoken style, not like reading a list of headlines. ` +
     `Do not mention that you are an AI. Do not use markdown, lists, or emojis — plain spoken sentences only. ` +
     `If the user makes a grammar or word-choice mistake, don't interrupt the flow to correct it every time — occasionally, naturally, ` +
     `weave the correct form back into your own reply the way a friend would, without explicitly pointing it out unless they ask for help. ` +
@@ -308,7 +311,7 @@ async function callGroq(){
     body: JSON.stringify({
       model: GROQ_MODEL,
       messages,
-      max_tokens: 150,
+      max_tokens: 220,
       temperature: 0.8,
     }),
   });
