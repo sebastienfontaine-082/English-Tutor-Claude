@@ -9,6 +9,8 @@ const store = {
   set voiceURI(v){ localStorage.setItem('voiceURI', v); },
   get rate(){ return parseFloat(localStorage.getItem('rate') || '1'); },
   set rate(v){ localStorage.setItem('rate', v); },
+  get pauseMs(){ return parseInt(localStorage.getItem('pauseMs') || '2200', 10); },
+  set pauseMs(v){ localStorage.setItem('pauseMs', v); },
 };
 
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
@@ -57,12 +59,16 @@ const btnLabel = document.getElementById('btnLabel');
 const stopBtn = document.getElementById('stopBtn');
 const statusEl = document.getElementById('status');
 const captionEl = document.getElementById('caption');
+const captionWrapEl = document.getElementById('captionWrap');
 
-// Keeps the caption's visual height roughly constant (shows the tail of
-// long text) so a growing transcript never pushes the orb around.
+// Shows the full text (never truncated) and auto-scrolls so the most
+// recent line lands vertically centered in the fixed-height window,
+// thanks to the caption's top/bottom padding.
 function setCaption(text){
-  const MAX_CHARS = 170;
-  captionEl.textContent = text.length > MAX_CHARS ? '… ' + text.slice(-MAX_CHARS) : text;
+  captionEl.textContent = text;
+  requestAnimationFrame(() => {
+    captionWrapEl.scrollTo({ top: captionWrapEl.scrollHeight, behavior: 'smooth' });
+  });
 }
 const settingsBtn = document.getElementById('settingsBtn');
 const settingsPanel = document.getElementById('settingsPanel');
@@ -72,6 +78,8 @@ const apiKeyInput = document.getElementById('apiKeyInput');
 const topicInput = document.getElementById('topicInput');
 const voiceSelect = document.getElementById('voiceSelect');
 const rateInput = document.getElementById('rateInput');
+const pauseInput = document.getElementById('pauseInput');
+const pauseHint = document.getElementById('pauseHint');
 
 /* ---------- Settings panel ---------- */
 
@@ -79,6 +87,8 @@ function openSettings(){
   apiKeyInput.value = store.key;
   topicInput.value = store.topic;
   rateInput.value = store.rate;
+  pauseInput.value = store.pauseMs;
+  updatePauseHint();
   populateVoices();
   settingsPanel.hidden = false;
 }
@@ -86,10 +96,15 @@ function closeSettings(){
   store.key = apiKeyInput.value.trim();
   store.topic = topicInput.value.trim();
   store.rate = parseFloat(rateInput.value);
+  store.pauseMs = parseInt(pauseInput.value, 10);
   const v = voiceSelect.value;
   if (v) store.voiceURI = v;
   settingsPanel.hidden = true;
 }
+function updatePauseHint(){
+  pauseHint.textContent = (parseInt(pauseInput.value, 10) / 1000).toFixed(1) + 's';
+}
+pauseInput.addEventListener('input', updatePauseHint);
 settingsBtn.addEventListener('click', openSettings);
 closeSettingsBtn.addEventListener('click', closeSettings);
 resetConvoBtn.addEventListener('click', () => {
@@ -213,8 +228,8 @@ function buildRecognition(){
 }
 
 // How long a silence has to last before we consider the user done talking.
-// Generous on purpose — tolerates hesitation, "uhh", searching for a word, etc.
-const SILENCE_MS = 2200;
+// Adjustable in settings — tolerates hesitation, "uhh", searching for a word, etc.
+function silenceMs(){ return store.pauseMs; }
 
 function setState(s){
   vizState = s;
@@ -275,7 +290,7 @@ function listen(){
     recognition.onend = () => {
       if (!sessionActive || vizState !== 'listening') return;
       const silentFor = Date.now() - lastSpeechTime;
-      if (accumulated.trim() && silentFor >= SILENCE_MS){
+      if (accumulated.trim() && silentFor >= silenceMs()){
         const text = accumulated.trim();
         accumulated = '';
         handleUserUtterance(text);
@@ -292,6 +307,13 @@ function listen(){
   startChunk();
 }
 
+function pushAssistantReply(reply){
+  const capped = reply.length > 900 ? reply.slice(0, 900) : reply;
+  history.push({ role: 'assistant', content: capped });
+  saveHistory();
+  return capped;
+}
+
 async function handleUserUtterance(text){
   if (text.length > 1000) text = text.slice(0, 1000); // safety cap, avoids oversized requests
   setState('thinking');
@@ -300,9 +322,8 @@ async function handleUserUtterance(text){
 
   try{
     const reply = await callGroq();
-    history.push({ role: 'assistant', content: reply });
-    saveHistory();
-    speak(reply);
+    const capped = pushAssistantReply(reply);
+    speak(capped);
   }catch(err){
     console.error(err);
     statusEl.textContent = err.message || 'Connection error';
@@ -319,16 +340,21 @@ async function callGroq(){
   if (!store.key){
     throw new Error('Add your Groq API key in settings');
   }
-  const convo = history.slice(-16);
+
+  const lastUserFull = [...history].reverse().find(m => m.role === 'user');
+  const model = pickModel(lastUserFull ? lastUserFull.content : '');
+
+  // Search-model answers tend to be more verbose (search context, more
+  // detail) — keep less history on those turns to reduce payload size
+  // and the risk of a 413 (Request Entity Too Large).
+  const historyWindow = model === SEARCH_MODEL ? 6 : 16;
+  const convo = history.slice(-historyWindow);
   if (convo.length === 0){
     // Groq requires the last message to be role 'user'. This kickoff line
     // is never shown or saved — it just triggers the AI's opening line.
     convo.push({ role: 'user', content: '(Start the conversation with your opener.)' });
   }
   const messages = [{ role: 'system', content: systemPrompt() }, ...convo];
-
-  const lastUser = [...convo].reverse().find(m => m.role === 'user');
-  const model = pickModel(lastUser ? lastUser.content : '');
 
   const res = await fetch(GROQ_URL, {
     method: 'POST',
@@ -348,10 +374,12 @@ async function callGroq(){
     let detail = '';
     try{ const errBody = await res.json(); detail = errBody?.error?.message || ''; }catch(e){}
 
-    // If the search model is rate-limited, fall back to the reliable
-    // default model rather than ending the conversation.
-    if (res.status === 429 && model === SEARCH_MODEL){
-      return callGroqWithModel(messages, DEFAULT_MODEL);
+    // If the search model is rate-limited OR the request was too large,
+    // fall back to the reliable default model rather than ending the
+    // conversation.
+    if ((res.status === 429 || res.status === 413) && model === SEARCH_MODEL){
+      const fallbackMessages = [{ role: 'system', content: systemPrompt() }, ...history.slice(-4)];
+      return callGroqWithModel(fallbackMessages, DEFAULT_MODEL);
     }
 
     if (res.status === 401) throw new Error('Invalid API key');
@@ -448,9 +476,8 @@ async function startSession(){
     setState('thinking');
     try{
       const reply = await callGroq();
-      history.push({ role: 'assistant', content: reply });
-      saveHistory();
-      speak(reply);
+      const capped = pushAssistantReply(reply);
+      speak(capped);
     }catch(err){
       statusEl.textContent = err.message;
       captionEl.textContent = '⚠ ' + err.message;

@@ -116,15 +116,26 @@ html, body{
   z-index: 2;
 }
 
-.caption{
+.captionWrap{
   max-width: 320px;
+  height: 90px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  position: relative;
+  z-index: 2;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  mask-image: linear-gradient(to bottom, transparent, black 22%, black 78%, transparent);
+  -webkit-mask-image: linear-gradient(to bottom, transparent, black 22%, black 78%, transparent);
+}
+.captionWrap::-webkit-scrollbar{ display: none; }
+
+.caption{
+  padding: 42px 0;
   text-align: center;
   font-size: 15px;
   color: var(--text);
-  height: 76px;
-  overflow: hidden;
   line-height: 1.4;
-  z-index: 2;
   opacity: 0.9;
 }
 
