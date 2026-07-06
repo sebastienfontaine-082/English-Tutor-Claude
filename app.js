@@ -383,7 +383,7 @@ async function callGroq(){
     }
 
     if (res.status === 401) throw new Error('Invalid API key');
-    if (res.status === 429) throw new Error('Rate limit reached, wait a moment');
+    if (res.status === 429) throw new Error('Rate limit reached' + (detail ? ' — ' + detail : ', wait a moment'));
     throw new Error('Groq error ' + res.status + (detail ? ': ' + detail : ''));
   }
   const data = await res.json();
@@ -402,9 +402,11 @@ async function callGroqWithModel(messages, model){
     body: JSON.stringify({ model, messages, max_completion_tokens: 220, temperature: 0.8 }),
   });
   if (!res.ok){
+    let detail = '';
+    try{ const errBody = await res.json(); detail = errBody?.error?.message || ''; }catch(e){}
     if (res.status === 401) throw new Error('Invalid API key');
-    if (res.status === 429) throw new Error('Rate limit reached, wait a moment');
-    throw new Error('Groq error ' + res.status);
+    if (res.status === 429) throw new Error('Rate limit reached' + (detail ? ' — ' + detail : ', wait a moment'));
+    throw new Error('Groq error ' + res.status + (detail ? ': ' + detail : ''));
   }
   const data = await res.json();
   const content = data?.choices?.[0]?.message?.content;

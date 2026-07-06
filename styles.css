@@ -118,20 +118,20 @@ html, body{
 
 .captionWrap{
   max-width: 320px;
-  height: 90px;
+  width: 100%;
+  height: 108px; /* ~5 lines at 15px / line-height 1.4 */
   overflow-y: auto;
   overflow-x: hidden;
   position: relative;
   z-index: 2;
   scrollbar-width: none;
   -ms-overflow-style: none;
-  mask-image: linear-gradient(to bottom, transparent, black 22%, black 78%, transparent);
-  -webkit-mask-image: linear-gradient(to bottom, transparent, black 22%, black 78%, transparent);
+  mask-image: linear-gradient(to bottom, black 85%, transparent);
+  -webkit-mask-image: linear-gradient(to bottom, black 85%, transparent);
 }
 .captionWrap::-webkit-scrollbar{ display: none; }
 
 .caption{
-  padding: 42px 0;
   text-align: center;
   font-size: 15px;
   color: var(--text);
