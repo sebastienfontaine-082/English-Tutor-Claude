@@ -43,6 +43,8 @@ function systemPrompt(){
 }
 
 let history = [];
+let pendingMerge = false;            // true: next finalized utterance should merge onto the last user turn (app cut user off early)
+let pendingInterruptionNote = false; // true: next finalized utterance is a deliberate interruption of the AI
 
 function loadHistory(){
   try{ history = JSON.parse(sessionStorage.getItem('history') || '[]'); }catch(e){ history = []; }
@@ -79,6 +81,44 @@ function setUserCaption(text){
 function setActiveZone(which){
   aiCaptionWrapEl.classList.toggle('active', which === 'ai');
   userCaptionWrapEl.classList.toggle('active', which === 'user');
+}
+
+/* ---------- Semantic end-of-sentence indicator (passive, informational only) ---------- */
+
+const semanticDotEl = document.getElementById('semanticDot');
+function setSemanticIndicator(state){
+  semanticDotEl.classList.remove('complete', 'incomplete');
+  if (state === 'complete') semanticDotEl.classList.add('complete');
+  else if (state === 'incomplete') semanticDotEl.classList.add('incomplete');
+}
+
+let semanticCheckTimer = null;
+
+// Words that, when trailing, strongly suggest the thought isn't finished
+// yet (articles, conjunctions, prepositions, pronouns, fillers...).
+const CONTINUATION_ENDERS = new Set([
+  'a','an','the','and','or','but','so','because','if','when','while','although',
+  'to','of','in','on','at','for','with','from','by','about','as','that','which','who',
+  'is','are','was','were','am','be','been','being','i','you','he','she','it','we','they',
+  'my','your','his','her','its','our','their','um','uh','er','like','than','then','not',
+]);
+
+// Free, local, instant heuristic — no network call, so it costs nothing.
+// It's cruder than an LLM judgment, but reacts immediately and never
+// touches the API quota.
+function isLikelyComplete(text){
+  const words = text.trim().toLowerCase().replace(/[^\w\s']/g, '').split(/\s+/).filter(Boolean);
+  if (words.length < 3) return false;
+  const lastWord = words[words.length - 1];
+  if (CONTINUATION_ENDERS.has(lastWord)) return false;
+  return true;
+}
+
+function scheduleSemanticCheck(text){
+  clearTimeout(semanticCheckTimer);
+  semanticCheckTimer = setTimeout(() => {
+    setSemanticIndicator(isLikelyComplete(text) ? 'complete' : 'incomplete');
+  }, 150);
 }
 const settingsBtn = document.getElementById('settingsBtn');
 const settingsPanel = document.getElementById('settingsPanel');
@@ -264,6 +304,7 @@ function listen(){
   let lastSpeechTime = Date.now();
   setUserCaption('');
   setActiveZone('user');
+  setSemanticIndicator('unknown');
 
   function startChunk(){
     if (!sessionActive) return;
@@ -282,8 +323,11 @@ function listen(){
       if (last.isFinal){
         if (t.trim()) accumulated = (accumulated + ' ' + t).trim();
         setUserCaption(accumulated);
+        scheduleSemanticCheck(accumulated);
       } else {
-        setUserCaption((accumulated + ' ' + t).trim());
+        const combined = (accumulated + ' ' + t).trim();
+        setUserCaption(combined);
+        scheduleSemanticCheck(combined);
       }
     };
 
@@ -330,7 +374,26 @@ function pushAssistantReply(reply){
 async function handleUserUtterance(text){
   if (text.length > 1000) text = text.slice(0, 1000); // safety cap, avoids oversized requests
   setState('thinking');
-  history.push({ role: 'user', content: text });
+
+  if (pendingMerge){
+    // The app likely cut the user off mid-thought during the previous
+    // turn — fold this continuation onto their last message instead of
+    // treating it as a brand new one, so the AI sees the whole thought.
+    pendingMerge = false;
+    if (history.length && history[history.length - 1].role === 'user'){
+      history[history.length - 1].content = (history[history.length - 1].content + ' ' + text).trim();
+    } else {
+      history.push({ role: 'user', content: text });
+    }
+  } else if (pendingInterruptionNote){
+    // The user deliberately cut the AI off — flag it so the AI reacts
+    // naturally instead of getting confused or repeating itself.
+    pendingInterruptionNote = false;
+    history.push({ role: 'system', content: 'The user just cut you off mid-sentence out of enthusiasm, not rudeness — react naturally, do not apologize or make a big deal of it.' });
+    history.push({ role: 'user', content: text });
+  } else {
+    history.push({ role: 'user', content: text });
+  }
   saveHistory();
 
   try{
@@ -427,6 +490,96 @@ async function callGroqWithModel(messages, model){
   return content.trim();
 }
 
+/* ---------- Barge-in detection ---------- */
+
+// Runs a lightweight amplitude-based voice detector while the AI is
+// speaking. Uses echoCancellation so the phone's own TTS output (leaking
+// into the mic) is suppressed as much as the browser's AEC allows — not
+// perfect on every device, but the standard mechanism for this exact
+// scenario (same one hands-free calls rely on).
+function watchForBargeIn(onTrigger){
+  let stopped = false;
+  let cleanup = () => {};
+
+  navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+  }).then(stream => {
+    if (stopped){ stream.getTracks().forEach(t => t.stop()); return; }
+
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 512;
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    audioCtx.createMediaStreamSource(stream).connect(analyser);
+
+    const startTime = Date.now();
+    let baseline = null;
+    let aboveCount = 0;
+    let timer = null;
+
+    cleanup = () => {
+      if (timer) clearTimeout(timer);
+      stream.getTracks().forEach(t => t.stop());
+      try{ audioCtx.close(); }catch(e){}
+    };
+
+    function sample(){
+      if (stopped) return;
+      analyser.getByteTimeDomainData(data);
+      let sum = 0;
+      for (let i = 0; i < data.length; i++) sum += Math.abs(data[i] - 128);
+      const level = sum / data.length;
+      const elapsed = Date.now() - startTime;
+
+      // Calibrate against ambient/leak level shortly after starting.
+      if (baseline === null && elapsed > 350) baseline = level;
+
+      if (baseline !== null && elapsed > 420){
+        if (level > baseline + 18){
+          aboveCount++;
+          if (aboveCount >= 2){ // ~160ms of sustained louder sound
+            stopped = true;
+            cleanup();
+            onTrigger();
+            return;
+          }
+        } else {
+          aboveCount = 0;
+        }
+      }
+      timer = setTimeout(sample, 80);
+    }
+    sample();
+  }).catch(() => { /* mic unavailable this turn — barge-in just won't fire */ });
+
+  return () => { stopped = true; cleanup(); };
+}
+
+// How far into the AI's reply (0–1) a barge-in still counts as "the app
+// cut the user off early, they're continuing the same thought" rather
+// than "a deliberate interruption".
+const BARGE_IN_EARLY_FRACTION = 0.25;
+
+function handleBargeIn(spokenPortion, fraction){
+  setAiCaption(spokenPortion || '(interrupted)');
+
+  if (fraction < BARGE_IN_EARLY_FRACTION){
+    if (history.length && history[history.length - 1].role === 'assistant'){
+      history.pop(); // discard the premature reply entirely
+      saveHistory();
+    }
+    pendingMerge = true;
+  } else {
+    if (history.length && history[history.length - 1].role === 'assistant'){
+      history[history.length - 1].content = spokenPortion || '(cut short)';
+      saveHistory();
+    }
+    pendingInterruptionNote = true;
+  }
+
+  listen();
+}
+
 /* ---------- Speech synthesis ---------- */
 
 function speakRaw(text, onProgress){
@@ -437,15 +590,31 @@ function speakRaw(text, onProgress){
     if (chosen) u.voice = chosen;
     u.lang = 'en-US';
     u.rate = store.rate || 1;
-    u.onboundary = (e) => {
-      if (onProgress){
-        const end = e.charIndex + (e.charLength || 0);
-        onProgress(text.slice(0, end > 0 ? end : e.charIndex).trim());
-      }
-    };
-    u.onend = resolve;
-    u.onerror = resolve;
+
+    let revealTimer = null;
+    function stopReveal(){ if (revealTimer) clearInterval(revealTimer); }
+
+    u.onend = () => { stopReveal(); resolve(); };
+    u.onerror = () => { stopReveal(); resolve(); };
     speechSynthesis.speak(u);
+
+    // onboundary (word-by-word progress) is unfortunately not reliably
+    // fired by Android Chrome's TTS engine, so we simulate the reveal
+    // timing instead, based on a rough estimate of speaking rate — this
+    // still gives a "written as it's spoken" feel even without a real
+    // signal from the speech engine.
+    if (onProgress){
+      const words = text.split(/\s+/).filter(Boolean);
+      const charsPerSecond = 14 * (store.rate || 1);
+      const totalMs = Math.max(300, (text.length / charsPerSecond) * 1000);
+      const msPerWord = totalMs / Math.max(1, words.length);
+      let idx = 0;
+      revealTimer = setInterval(() => {
+        idx++;
+        onProgress(words.slice(0, idx).join(' '));
+        if (idx >= words.length) stopReveal();
+      }, msPerWord);
+    }
   });
 }
 
@@ -453,10 +622,35 @@ async function speak(text){
   setState('speaking');
   setActiveZone('ai');
   setAiCaption('');
-  await speakRaw(text, setAiCaption);
-  setAiCaption(text); // safety net in case onboundary isn't supported/fired
-  if (sessionActive) listen();
-  else setState('idle');
+
+  let spokenChars = 0;
+  let bargeTriggered = false;
+
+  const stopWatch = watchForBargeIn(() => {
+    bargeTriggered = true;
+    speechSynthesis.cancel();
+  });
+
+  await speakRaw(text, (partial) => {
+    spokenChars = partial.length;
+    setAiCaption(partial);
+  });
+
+  stopWatch();
+
+  if (!sessionActive){
+    setState('idle');
+    return;
+  }
+
+  if (bargeTriggered){
+    const fraction = text.length ? spokenChars / text.length : 0;
+    handleBargeIn(text.slice(0, spokenChars).trim(), fraction);
+    return;
+  }
+
+  setAiCaption(text);
+  listen();
 }
 
 /* ---------- Session control ---------- */
@@ -514,6 +708,8 @@ function endSession(){
   if (recognition) try{ recognition.stop(); }catch(e){}
   speechSynthesis.cancel();
   setActiveZone(null);
+  clearTimeout(semanticCheckTimer);
+  setSemanticIndicator('unknown');
   setState('idle');
 }
 
