@@ -74,16 +74,26 @@ html, body{
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  gap: 22px;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 16px 20px calc(28px + env(safe-area-inset-bottom));
+}
+
+.orbArea{
   position: relative;
-  padding: 20px;
+  width: min(78vw, 340px);
+  height: min(78vw, 340px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
 }
 
 #orbCanvas{
   position: absolute;
-  width: min(78vw, 340px);
-  height: min(78vw, 340px);
+  inset: 0;
+  width: 100%;
+  height: 100%;
   pointer-events: none;
 }
 
@@ -108,13 +118,20 @@ html, body{
 .mainBtn.speaking{ box-shadow: 0 0 0 1px var(--speak), 0 0 40px -6px var(--speak); }
 
 .status{
-  margin-top: 190px;
   font-size: 14px;
   color: var(--text-dim);
   letter-spacing: 0.05em;
   min-height: 18px;
   z-index: 2;
+  flex-shrink: 0;
 }
+
+.zone{
+  transition: opacity 0.25s ease;
+  opacity: 0.35;
+  flex-shrink: 0;
+}
+.zone.active{ opacity: 1; }
 
 .captionWrap{
   max-width: 320px;
@@ -138,23 +155,6 @@ html, body{
   line-height: 1.4;
   opacity: 0.9;
 }
-
-.footer{
-  padding: 10px 20px 26px;
-  display: flex;
-  justify-content: center;
-}
-
-.stopBtn{
-  background: none;
-  border: 1px solid var(--line);
-  color: var(--danger);
-  padding: 12px 26px;
-  border-radius: 999px;
-  font-size: 14px;
-  letter-spacing: 0.04em;
-}
-.stopBtn:active{ background: rgba(224,97,107,0.08); }
 
 /* Settings overlay */
 .overlay{

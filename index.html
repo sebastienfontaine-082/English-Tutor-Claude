@@ -16,22 +16,27 @@
 
   <header class="topbar">
     <span class="wordmark">talk<span class="dot">.</span></span>
-    <span id="versionTag" class="versionTag">v2.3</span>
+    <span id="versionTag" class="versionTag">v2.4</span>
     <button id="settingsBtn" class="iconBtn" aria-label="Settings">⚙</button>
   </header>
 
   <main class="stage">
-    <canvas id="orbCanvas" width="600" height="600"></canvas>
-    <button id="mainBtn" class="mainBtn" aria-label="Start conversation">
-      <span id="btnLabel">TALK</span>
-    </button>
-    <p id="status" class="status">Tap to start</p>
-    <div id="captionWrap" class="captionWrap"><p id="caption" class="caption"></p></div>
-  </main>
+    <div id="aiCaptionWrap" class="captionWrap zone">
+      <p id="aiCaption" class="caption"></p>
+    </div>
 
-  <footer class="footer">
-    <button id="stopBtn" class="stopBtn" hidden>End conversation</button>
-  </footer>
+    <div class="orbArea">
+      <canvas id="orbCanvas" width="600" height="600"></canvas>
+      <button id="mainBtn" class="mainBtn" aria-label="Start or end conversation">
+        <span id="btnLabel">TALK</span>
+      </button>
+    </div>
+    <p id="status" class="status">Tap to start</p>
+
+    <div id="userCaptionWrap" class="captionWrap zone">
+      <p id="userCaption" class="caption"></p>
+    </div>
+  </main>
 
 </div>
 

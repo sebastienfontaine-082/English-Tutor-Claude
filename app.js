@@ -56,19 +56,29 @@ loadHistory();
 
 const mainBtn = document.getElementById('mainBtn');
 const btnLabel = document.getElementById('btnLabel');
-const stopBtn = document.getElementById('stopBtn');
 const statusEl = document.getElementById('status');
-const captionEl = document.getElementById('caption');
-const captionWrapEl = document.getElementById('captionWrap');
+const aiCaptionEl = document.getElementById('aiCaption');
+const aiCaptionWrapEl = document.getElementById('aiCaptionWrap');
+const userCaptionEl = document.getElementById('userCaption');
+const userCaptionWrapEl = document.getElementById('userCaptionWrap');
 
-// Shows the full text (never truncated) and auto-scrolls so the most
-// recent line lands vertically centered in the fixed-height window,
-// thanks to the caption's top/bottom padding.
-function setCaption(text){
-  captionEl.textContent = text;
+function scrollToBottom(wrapEl){
   requestAnimationFrame(() => {
-    captionWrapEl.scrollTo({ top: captionWrapEl.scrollHeight, behavior: 'smooth' });
+    wrapEl.scrollTo({ top: wrapEl.scrollHeight, behavior: 'smooth' });
   });
+}
+function setAiCaption(text){
+  aiCaptionEl.textContent = text;
+  scrollToBottom(aiCaptionWrapEl);
+}
+function setUserCaption(text){
+  userCaptionEl.textContent = text;
+  scrollToBottom(userCaptionWrapEl);
+}
+// Highlights whichever zone is currently "live" (speaking vs listening).
+function setActiveZone(which){
+  aiCaptionWrapEl.classList.toggle('active', which === 'ai');
+  userCaptionWrapEl.classList.toggle('active', which === 'user');
 }
 const settingsBtn = document.getElementById('settingsBtn');
 const settingsPanel = document.getElementById('settingsPanel');
@@ -110,7 +120,8 @@ closeSettingsBtn.addEventListener('click', closeSettings);
 resetConvoBtn.addEventListener('click', () => {
   history = [];
   saveHistory();
-  captionEl.textContent = '';
+  setAiCaption('');
+  setUserCaption('');
   statusEl.textContent = 'Conversation reset. Tap to start';
 });
 
@@ -251,6 +262,8 @@ function listen(){
 
   let accumulated = '';
   let lastSpeechTime = Date.now();
+  setUserCaption('');
+  setActiveZone('user');
 
   function startChunk(){
     if (!sessionActive) return;
@@ -268,9 +281,9 @@ function listen(){
 
       if (last.isFinal){
         if (t.trim()) accumulated = (accumulated + ' ' + t).trim();
-        setCaption(accumulated);
+        setUserCaption(accumulated);
       } else {
-        setCaption((accumulated + ' ' + t).trim());
+        setUserCaption((accumulated + ' ' + t).trim());
       }
     };
 
@@ -327,10 +340,10 @@ async function handleUserUtterance(text){
   }catch(err){
     console.error(err);
     statusEl.textContent = err.message || 'Connection error';
-    captionEl.textContent = '⚠ ' + (err.message || 'Connection error');
+    setAiCaption('⚠ ' + (err.message || 'Connection error'));
+    setActiveZone('ai');
     setState('idle');
     sessionActive = false;
-    toggleSessionUI(false);
   }
 }
 
@@ -416,7 +429,7 @@ async function callGroqWithModel(messages, model){
 
 /* ---------- Speech synthesis ---------- */
 
-function speakRaw(text){
+function speakRaw(text, onProgress){
   return new Promise((resolve) => {
     speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text);
@@ -424,6 +437,12 @@ function speakRaw(text){
     if (chosen) u.voice = chosen;
     u.lang = 'en-US';
     u.rate = store.rate || 1;
+    u.onboundary = (e) => {
+      if (onProgress){
+        const end = e.charIndex + (e.charLength || 0);
+        onProgress(text.slice(0, end > 0 ? end : e.charIndex).trim());
+      }
+    };
     u.onend = resolve;
     u.onerror = resolve;
     speechSynthesis.speak(u);
@@ -432,17 +451,15 @@ function speakRaw(text){
 
 async function speak(text){
   setState('speaking');
-  setCaption(text);
-  await speakRaw(text);
+  setActiveZone('ai');
+  setAiCaption('');
+  await speakRaw(text, setAiCaption);
+  setAiCaption(text); // safety net in case onboundary isn't supported/fired
   if (sessionActive) listen();
   else setState('idle');
 }
 
 /* ---------- Session control ---------- */
-
-function toggleSessionUI(active){
-  stopBtn.hidden = !active;
-}
 
 async function startSession(){
   if (!store.key){
@@ -465,13 +482,14 @@ async function startSession(){
   }
 
   sessionActive = true;
-  toggleSessionUI(true);
 
   // Instant local welcome — no network needed — confirms TTS works
   // even before we contact Groq for the real conversation opener.
   setState('speaking');
-  await speakRaw("Hi! Let's talk.");
-  if (!sessionActive) return; // user tapped "End conversation" during the welcome
+  setActiveZone('ai');
+  setAiCaption('');
+  await speakRaw("Hi! Let's talk.", setAiCaption);
+  if (!sessionActive) return; // user tapped the orb to end during the welcome
 
   if (history.length === 0){
     // AI opens the conversation
@@ -482,9 +500,8 @@ async function startSession(){
       speak(capped);
     }catch(err){
       statusEl.textContent = err.message;
-      captionEl.textContent = '⚠ ' + err.message;
+      setAiCaption('⚠ ' + err.message);
       sessionActive = false;
-      toggleSessionUI(false);
       setState('idle');
     }
   } else {
@@ -494,16 +511,16 @@ async function startSession(){
 
 function endSession(){
   sessionActive = false;
-  toggleSessionUI(false);
   if (recognition) try{ recognition.stop(); }catch(e){}
   speechSynthesis.cancel();
+  setActiveZone(null);
   setState('idle');
 }
 
 mainBtn.addEventListener('click', () => {
   if (!sessionActive) startSession();
+  else endSession();
 });
-stopBtn.addEventListener('click', endSession);
 
 /* ---------- Boot ---------- */
 
