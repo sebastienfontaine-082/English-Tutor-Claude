@@ -16,7 +16,7 @@
 
   <header class="topbar">
     <span class="wordmark">talk<span class="dot">.</span></span>
-    <span id="versionTag" class="versionTag">v3.2</span>
+    <span id="versionTag" class="versionTag">v3.4</span>
     <button id="settingsBtn" class="iconBtn" aria-label="Settings">⚙</button>
   </header>
 
@@ -36,6 +36,7 @@
 
     <div id="userCaptionWrap" class="captionWrap zone">
       <p id="userCaption" class="caption"></p>
+      <video id="camPreview" class="camPreview" autoplay muted playsinline hidden></video>
     </div>
   </main>
 
@@ -78,16 +79,16 @@
     <p class="hint" id="pauseHint">2.2s</p>
 
     <label class="field row">
-      <span>Barge-in (interrupt AI by talking)</span>
-      <input id="bargeInToggle" type="checkbox" checked>
-    </label>
-    <p class="hint">Experimental. Now tuned to avoid the choppy/quiet audio issue (no more echo cancellation on this mic feed, which seemed to be the trigger) — but that's a work in progress. Turn it off here if you still hear glitchy audio.</p>
-
-    <label class="field row">
       <span>Keep screen on while talking</span>
       <input id="keepAwakeToggle" type="checkbox">
     </label>
     <p class="hint">Useful since captions need the screen. When off, the app tries to keep working with the screen off, but browsers don't guarantee this (unlike a real phone call) — voice recognition may pause when the screen turns off.</p>
+
+    <label class="field row">
+      <span>Lip-movement detection (front camera)</span>
+      <input id="lipDetectToggle" type="checkbox" checked>
+    </label>
+    <p class="hint">Experimental. Uses the front camera (never the mic) to sense when you're mid-sentence vs. done, and to let you cut the AI off just by talking. Needs the screen on and your face in frame — falls back to timing alone otherwise. Requires camera permission.</p>
 
     <div class="sheetActions">
       <button id="resetConvoBtn" class="ghostBtn">Reset conversation</button>

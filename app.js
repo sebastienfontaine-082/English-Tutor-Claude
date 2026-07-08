@@ -11,10 +11,10 @@ const store = {
   set rate(v){ localStorage.setItem('rate', v); },
   get pauseMs(){ return parseInt(localStorage.getItem('pauseMs') || '2200', 10); },
   set pauseMs(v){ localStorage.setItem('pauseMs', v); },
-  get bargeInEnabled(){ return localStorage.getItem('bargeInEnabled') !== 'false'; }, // default on — testing the echoCancellation fix
-  set bargeInEnabled(v){ localStorage.setItem('bargeInEnabled', v); },
   get keepAwake(){ return localStorage.getItem('keepAwake') === 'true'; }, // default off
   set keepAwake(v){ localStorage.setItem('keepAwake', v); },
+  get lipDetectEnabled(){ return localStorage.getItem('lipDetectEnabled') !== 'false'; }, // default on
+  set lipDetectEnabled(v){ localStorage.setItem('lipDetectEnabled', v); },
   // Learned speaking rate, normalized to rate=1 — refined after every
   // utterance so the reveal speed adapts to the real device/voice.
   get charsPerSecondBase(){ return parseFloat(localStorage.getItem('cpsBase') || '15'); },
@@ -148,8 +148,9 @@ const voiceSelect = document.getElementById('voiceSelect');
 const rateInput = document.getElementById('rateInput');
 const pauseInput = document.getElementById('pauseInput');
 const pauseHint = document.getElementById('pauseHint');
-const bargeInToggle = document.getElementById('bargeInToggle');
 const keepAwakeToggle = document.getElementById('keepAwakeToggle');
+const lipDetectToggle = document.getElementById('lipDetectToggle');
+const camPreviewEl = document.getElementById('camPreview');
 
 /* ---------- Settings panel ---------- */
 
@@ -158,8 +159,8 @@ function openSettings(){
   topicInput.value = store.topic;
   rateInput.value = store.rate;
   pauseInput.value = store.pauseMs;
-  bargeInToggle.checked = store.bargeInEnabled;
   keepAwakeToggle.checked = store.keepAwake;
+  lipDetectToggle.checked = store.lipDetectEnabled;
   updatePauseHint();
   populateVoices();
   settingsPanel.hidden = false;
@@ -169,13 +170,18 @@ function closeSettings(){
   store.topic = topicInput.value.trim();
   store.rate = parseFloat(rateInput.value);
   store.pauseMs = parseInt(pauseInput.value, 10);
-  store.bargeInEnabled = bargeInToggle.checked;
   store.keepAwake = keepAwakeToggle.checked;
+  const lipWasEnabled = store.lipDetectEnabled;
+  store.lipDetectEnabled = lipDetectToggle.checked;
   const v = voiceSelect.value;
   if (v) store.voiceURI = v;
   settingsPanel.hidden = true;
   if (sessionActive && store.keepAwake) acquireWakeLock();
   if (!store.keepAwake) releaseWakeLock();
+  if (sessionActive){
+    if (store.lipDetectEnabled && !lipWasEnabled) startLipWatch();
+    if (!store.lipDetectEnabled && lipWasEnabled) stopLipWatch();
+  }
 }
 function updatePauseHint(){
   pauseHint.textContent = (parseInt(pauseInput.value, 10) / 1000).toFixed(1) + 's';
@@ -313,8 +319,11 @@ function buildRecognition(){
 // that recovers gracefully on the rarer cases where that guess is wrong.
 function silenceMs(){
   const base = store.pauseMs;
+  // Lip signal only counts when a face is actually in frame — otherwise
+  // we fall back to heuristic+timer alone, as intended.
+  if (lipState === 'moving') return Math.max(base, 4000); // visibly still talking — strong signal, overrides the word heuristic
   if (lastSemanticState === 'incomplete') return Math.max(base, 4000);
-  if (lastSemanticState === 'complete') return Math.min(base, 1400);
+  if (lipState === 'still' || lastSemanticState === 'complete') return Math.min(base, 1400);
   return base;
 }
 
@@ -526,120 +535,6 @@ async function callGroqWithModel(messages, model){
   return content.trim();
 }
 
-/* ---------- Barge-in detection ---------- */
-
-// Runs a lightweight amplitude-based voice detector while the AI is
-// speaking. Uses echoCancellation so the phone's own TTS output (leaking
-// into the mic) is suppressed as much as the browser's AEC allows — not
-// perfect on every device, but the standard mechanism for this exact
-// scenario (same one hands-free calls rely on).
-function watchForBargeIn(onTrigger){
-  let stopped = false;
-  let cleanup = () => {};
-
-  navigator.mediaDevices.getUserMedia({
-    // Deliberately NOT requesting echoCancellation/noiseSuppression/
-    // autoGainControl here. Those seem to be what pushes Android into a
-    // call-style audio mode for the whole session — degrading (choppy,
-    // quieter) the AI's TTS output even without Bluetooth involved.
-    // Trade-off: without echo cancellation, this mic feed picks up more
-    // of the AI's own voice leaking from the speaker, so the trigger
-    // threshold below is tuned a bit more conservatively to compensate.
-    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
-  }).then(stream => {
-    if (stopped){ stream.getTracks().forEach(t => t.stop()); return; }
-
-    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 1024;
-    const data = new Uint8Array(analyser.frequencyBinCount);
-    audioCtx.createMediaStreamSource(stream).connect(analyser);
-
-    // Only look at the frequency band where human voice actually lives
-    // (~300Hz–3000Hz). Car engines, road noise, and AC hum are mostly
-    // energy below ~300Hz — ignoring that band makes the detector far
-    // less prone to false triggers from steady background noise.
-    const binHz = audioCtx.sampleRate / 2 / analyser.frequencyBinCount;
-    const loBin = Math.max(0, Math.floor(300 / binHz));
-    const hiBin = Math.min(data.length - 1, Math.ceil(3000 / binHz));
-
-    const startTime = Date.now();
-    let baseline = null;
-    let aboveCount = 0;
-    let timer = null;
-
-    cleanup = () => {
-      if (timer) clearTimeout(timer);
-      stream.getTracks().forEach(t => t.stop());
-      try{ audioCtx.close(); }catch(e){}
-    };
-
-    function sample(){
-      if (stopped) return;
-      analyser.getByteFrequencyData(data);
-      let sum = 0;
-      for (let i = loBin; i <= hiBin; i++) sum += data[i];
-      const level = sum / (hiBin - loBin + 1);
-      const elapsed = Date.now() - startTime;
-
-      // Continuously track the ambient/leak level (slow moving average)
-      // instead of a single early snapshot — this also means a steady
-      // background noise floor (engine hum, etc.) gets absorbed into the
-      // baseline rather than causing false triggers. Margin is higher
-      // than before since there's no echo cancellation to suppress the
-      // AI's own voice leaking into this mic feed.
-      if (baseline === null){
-        baseline = level;
-      } else if (level < baseline + 26){
-        baseline = baseline * 0.9 + level * 0.1;
-      }
-
-      if (elapsed > 300){
-        if (level > baseline + 26){
-          aboveCount++;
-          if (aboveCount >= 3){ // ~240ms of sustained louder sound
-            stopped = true;
-            cleanup();
-            onTrigger();
-            return;
-          }
-        } else {
-          aboveCount = 0;
-        }
-      }
-      timer = setTimeout(sample, 80);
-    }
-    sample();
-  }).catch(() => { /* mic unavailable this turn — barge-in just won't fire */ });
-
-  return () => { stopped = true; cleanup(); };
-}
-
-// How far into the AI's reply (0–1) a barge-in still counts as "the app
-// cut the user off early, they're continuing the same thought" rather
-// than "a deliberate interruption".
-const BARGE_IN_EARLY_FRACTION = 0.25;
-
-function handleBargeIn(spokenPortion, fraction){
-  setAiCaption(spokenPortion || '(interrupted)');
-
-  if (fraction < BARGE_IN_EARLY_FRACTION){
-    if (history.length && history[history.length - 1].role === 'assistant'){
-      history.pop(); // discard the premature reply entirely
-      saveHistory();
-    }
-    pendingMerge = true;
-  } else {
-    if (history.length && history[history.length - 1].role === 'assistant'){
-      history[history.length - 1].content = spokenPortion || '(cut short)';
-      saveHistory();
-    }
-    pendingInterruptionNote = true;
-  }
-
-  listen();
-}
-
 /* ---------- Speech synthesis ---------- */
 
 function speakRaw(text, onProgress){
@@ -693,6 +588,115 @@ function speakRaw(text, onProgress){
   });
 }
 
+/* ---------- Visual lip-movement detection ---------- */
+// Uses the front camera (never the mic) so it never touches the audio
+// pipeline that caused the Bluetooth/choppy-TTS problems. Runs
+// continuously for the whole session once started; both the listening
+// side (silenceMs) and the speaking side (visual barge-in) just read the
+// shared `lipState` variable below.
+
+let faceLandmarkerPromise = null;
+function ensureFaceLandmarker(){
+  if (!faceLandmarkerPromise){
+    faceLandmarkerPromise = (async () => {
+      const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs');
+      const fileset = await vision.FilesetResolver.forVisionTasks(
+        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
+      );
+      return vision.FaceLandmarker.createFromOptions(fileset, {
+        baseOptions: {
+          modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
+          delegate: 'GPU',
+        },
+        runningMode: 'VIDEO',
+        numFaces: 1,
+      });
+    })().catch(err => { console.warn('Face landmarker failed to load', err); faceLandmarkerPromise = null; return null; });
+  }
+  return faceLandmarkerPromise;
+}
+
+let camStream = null;
+let lipLoopTimer = null;
+let lipState = 'no-face'; // 'no-face' | 'still' | 'moving'
+let mouthBuffer = [];
+
+const MOUTH_UPPER = 13, MOUTH_LOWER = 14, EYE_L = 33, EYE_R = 263;
+const MOVING_THRESHOLD = 0.045; // normalized units — will likely need real-device tuning
+const BUFFER_MS = 650;
+
+function dist(a, b){ return Math.hypot(a.x - b.x, a.y - b.y); }
+
+async function startLipWatch(){
+  if (!store.lipDetectEnabled || camStream) return;
+  try{
+    camStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user', width: { ideal: 320 }, height: { ideal: 240 } }
+    });
+  }catch(e){
+    camStream = null;
+    return; // permission denied or no camera — silently fall back to audio-only
+  }
+
+  camPreviewEl.srcObject = camStream;
+  camPreviewEl.hidden = false;
+
+  const landmarker = await ensureFaceLandmarker();
+  if (!landmarker || !camStream){ stopLipWatch(); return; }
+
+  lipLoopTimer = setInterval(() => {
+    if (camPreviewEl.readyState < 2) return; // not enough video data yet
+    let result;
+    try{ result = landmarker.detectForVideo(camPreviewEl, performance.now()); }
+    catch(e){ return; }
+
+    if (!result || !result.faceLandmarks || !result.faceLandmarks.length){
+      lipState = 'no-face';
+      mouthBuffer = [];
+      return;
+    }
+
+    const lm = result.faceLandmarks[0];
+    const eyeDist = dist(lm[EYE_L], lm[EYE_R]) || 1;
+    const mouthOpen = dist(lm[MOUTH_UPPER], lm[MOUTH_LOWER]) / eyeDist;
+
+    const now = Date.now();
+    mouthBuffer.push({ t: now, v: mouthOpen });
+    mouthBuffer = mouthBuffer.filter(s => now - s.t <= BUFFER_MS);
+
+    if (mouthBuffer.length >= 3){
+      const vals = mouthBuffer.map(s => s.v);
+      const range = Math.max(...vals) - Math.min(...vals);
+      lipState = range > MOVING_THRESHOLD ? 'moving' : 'still';
+    }
+  }, 100); // ~10Hz — plenty for mouth movement, easy on battery
+}
+
+function stopLipWatch(){
+  if (lipLoopTimer) clearInterval(lipLoopTimer);
+  lipLoopTimer = null;
+  if (camStream) camStream.getTracks().forEach(t => t.stop());
+  camStream = null;
+  camPreviewEl.hidden = true;
+  camPreviewEl.srcObject = null;
+  lipState = 'no-face';
+  mouthBuffer = [];
+}
+
+function watchForVisualBargeIn(onTrigger){
+  if (!store.lipDetectEnabled) return () => {};
+  let stopped = false;
+  const iv = setInterval(() => {
+    if (stopped) return;
+    if (lipState === 'moving'){
+      stopped = true;
+      clearInterval(iv);
+      onTrigger();
+    }
+  }, 150);
+  return () => { stopped = true; clearInterval(iv); };
+}
+
 async function speak(text){
   setState('speaking');
   setActiveZone('ai');
@@ -700,15 +704,9 @@ async function speak(text){
 
   let spokenChars = 0;
   let bargeTriggered = false;
+  const stopWatch = watchForVisualBargeIn(() => { bargeTriggered = true; speechSynthesis.cancel(); });
 
-  const stopWatch = store.bargeInEnabled
-    ? watchForBargeIn(() => { bargeTriggered = true; speechSynthesis.cancel(); })
-    : () => {};
-
-  await speakRaw(text, (partial) => {
-    spokenChars = partial.length;
-    setAiCaption(partial);
-  });
+  await speakRaw(text, (partial) => { spokenChars = partial.length; setAiCaption(partial); });
 
   stopWatch();
 
@@ -724,6 +722,31 @@ async function speak(text){
   }
 
   setAiCaption(text);
+  listen();
+}
+
+// How far into the AI's reply (0–1) a barge-in still counts as "the app
+// cut the user off early, they're continuing the same thought" rather
+// than "a deliberate interruption".
+const BARGE_IN_EARLY_FRACTION = 0.25;
+
+function handleBargeIn(spokenPortion, fraction){
+  setAiCaption(spokenPortion || '(interrupted)');
+
+  if (fraction < BARGE_IN_EARLY_FRACTION){
+    if (history.length && history[history.length - 1].role === 'assistant'){
+      history.pop(); // discard the premature reply entirely
+      saveHistory();
+    }
+    pendingMerge = true;
+  } else {
+    if (history.length && history[history.length - 1].role === 'assistant'){
+      history[history.length - 1].content = spokenPortion || '(cut short)';
+      saveHistory();
+    }
+    pendingInterruptionNote = true;
+  }
+
   listen();
 }
 
@@ -767,6 +790,7 @@ async function startSession(){
 
   sessionActive = true;
   if (store.keepAwake) acquireWakeLock();
+  if (store.lipDetectEnabled) startLipWatch();
 
   if (history.length === 0){
     // AI opens the conversation
@@ -794,6 +818,7 @@ function endSession(){
   clearTimeout(semanticCheckTimer);
   setSemanticIndicator('unknown');
   releaseWakeLock();
+  stopLipWatch();
   setState('idle');
 }
 
