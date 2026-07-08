@@ -11,7 +11,7 @@ const store = {
   set rate(v){ localStorage.setItem('rate', v); },
   get pauseMs(){ return parseInt(localStorage.getItem('pauseMs') || '2200', 10); },
   set pauseMs(v){ localStorage.setItem('pauseMs', v); },
-  get bargeInEnabled(){ return localStorage.getItem('bargeInEnabled') === 'true'; }, // default off — degrades TTS audio even without Bluetooth
+  get bargeInEnabled(){ return localStorage.getItem('bargeInEnabled') !== 'false'; }, // default on — testing the echoCancellation fix
   set bargeInEnabled(v){ localStorage.setItem('bargeInEnabled', v); },
   get keepAwake(){ return localStorage.getItem('keepAwake') === 'true'; }, // default off
   set keepAwake(v){ localStorage.setItem('keepAwake', v); },
@@ -538,7 +538,14 @@ function watchForBargeIn(onTrigger){
   let cleanup = () => {};
 
   navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    // Deliberately NOT requesting echoCancellation/noiseSuppression/
+    // autoGainControl here. Those seem to be what pushes Android into a
+    // call-style audio mode for the whole session — degrading (choppy,
+    // quieter) the AI's TTS output even without Bluetooth involved.
+    // Trade-off: without echo cancellation, this mic feed picks up more
+    // of the AI's own voice leaking from the speaker, so the trigger
+    // threshold below is tuned a bit more conservatively to compensate.
+    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
   }).then(stream => {
     if (stopped){ stream.getTracks().forEach(t => t.stop()); return; }
 
@@ -578,17 +585,19 @@ function watchForBargeIn(onTrigger){
       // Continuously track the ambient/leak level (slow moving average)
       // instead of a single early snapshot — this also means a steady
       // background noise floor (engine hum, etc.) gets absorbed into the
-      // baseline rather than causing false triggers.
+      // baseline rather than causing false triggers. Margin is higher
+      // than before since there's no echo cancellation to suppress the
+      // AI's own voice leaking into this mic feed.
       if (baseline === null){
         baseline = level;
-      } else if (level < baseline + 16){
+      } else if (level < baseline + 26){
         baseline = baseline * 0.9 + level * 0.1;
       }
 
       if (elapsed > 300){
-        if (level > baseline + 16){
+        if (level > baseline + 26){
           aboveCount++;
-          if (aboveCount >= 2){ // ~160ms of sustained louder sound
+          if (aboveCount >= 3){ // ~240ms of sustained louder sound
             stopped = true;
             cleanup();
             onTrigger();
