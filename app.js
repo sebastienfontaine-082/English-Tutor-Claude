@@ -11,6 +11,10 @@ const store = {
   set rate(v){ localStorage.setItem('rate', v); },
   get pauseMs(){ return parseInt(localStorage.getItem('pauseMs') || '2200', 10); },
   set pauseMs(v){ localStorage.setItem('pauseMs', v); },
+  // Learned speaking rate, normalized to rate=1 — refined after every
+  // utterance so the reveal speed adapts to the real device/voice.
+  get charsPerSecondBase(){ return parseFloat(localStorage.getItem('cpsBase') || '15'); },
+  set charsPerSecondBase(v){ localStorage.setItem('cpsBase', v); },
 };
 
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
@@ -86,7 +90,9 @@ function setActiveZone(which){
 /* ---------- Semantic end-of-sentence indicator (passive, informational only) ---------- */
 
 const semanticDotEl = document.getElementById('semanticDot');
+let lastSemanticState = 'unknown';
 function setSemanticIndicator(state){
+  lastSemanticState = state;
   semanticDotEl.classList.remove('complete', 'incomplete');
   if (state === 'complete') semanticDotEl.classList.add('complete');
   else if (state === 'incomplete') semanticDotEl.classList.add('incomplete');
@@ -95,11 +101,14 @@ function setSemanticIndicator(state){
 let semanticCheckTimer = null;
 
 // Words that, when trailing, strongly suggest the thought isn't finished
-// yet (articles, conjunctions, prepositions, pronouns, fillers...).
+// yet (articles, conjunctions, prepositions, subject pronouns, fillers...).
+// Deliberately excludes object pronouns like "it"/"that" — those very
+// commonly and correctly end a complete English sentence ("I like it.",
+// "I know that.") and would otherwise cause false "incomplete" reads.
 const CONTINUATION_ENDERS = new Set([
   'a','an','the','and','or','but','so','because','if','when','while','although',
-  'to','of','in','on','at','for','with','from','by','about','as','that','which','who',
-  'is','are','was','were','am','be','been','being','i','you','he','she','it','we','they',
+  'to','of','in','on','at','for','with','from','by','about','as','which','who',
+  'is','are','was','were','am','be','been','being','i','you','he','she','we','they',
   'my','your','his','her','its','our','their','um','uh','er','like','than','then','not',
 ]);
 
@@ -280,7 +289,17 @@ function buildRecognition(){
 
 // How long a silence has to last before we consider the user done talking.
 // Adjustable in settings — tolerates hesitation, "uhh", searching for a word, etc.
-function silenceMs(){ return store.pauseMs; }
+// Adaptive pause: the settings slider is now the "unknown/ambiguous"
+// baseline. If the free heuristic spots an obviously dangling word, we
+// wait noticeably longer (less risk of cutting a real thought short).
+// If it looks finished, we finalize sooner — barge-in is the safety net
+// that recovers gracefully on the rarer cases where that guess is wrong.
+function silenceMs(){
+  const base = store.pauseMs;
+  if (lastSemanticState === 'incomplete') return Math.max(base, 4000);
+  if (lastSemanticState === 'complete') return Math.min(base, 1400);
+  return base;
+}
 
 function setState(s){
   vizState = s;
@@ -508,9 +527,17 @@ function watchForBargeIn(onTrigger){
 
     const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     const analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 512;
+    analyser.fftSize = 1024;
     const data = new Uint8Array(analyser.frequencyBinCount);
     audioCtx.createMediaStreamSource(stream).connect(analyser);
+
+    // Only look at the frequency band where human voice actually lives
+    // (~300Hz–3000Hz). Car engines, road noise, and AC hum are mostly
+    // energy below ~300Hz — ignoring that band makes the detector far
+    // less prone to false triggers from steady background noise.
+    const binHz = audioCtx.sampleRate / 2 / analyser.frequencyBinCount;
+    const loBin = Math.max(0, Math.floor(300 / binHz));
+    const hiBin = Math.min(data.length - 1, Math.ceil(3000 / binHz));
 
     const startTime = Date.now();
     let baseline = null;
@@ -525,17 +552,24 @@ function watchForBargeIn(onTrigger){
 
     function sample(){
       if (stopped) return;
-      analyser.getByteTimeDomainData(data);
+      analyser.getByteFrequencyData(data);
       let sum = 0;
-      for (let i = 0; i < data.length; i++) sum += Math.abs(data[i] - 128);
-      const level = sum / data.length;
+      for (let i = loBin; i <= hiBin; i++) sum += data[i];
+      const level = sum / (hiBin - loBin + 1);
       const elapsed = Date.now() - startTime;
 
-      // Calibrate against ambient/leak level shortly after starting.
-      if (baseline === null && elapsed > 350) baseline = level;
+      // Continuously track the ambient/leak level (slow moving average)
+      // instead of a single early snapshot — this also means a steady
+      // background noise floor (engine hum, etc.) gets absorbed into the
+      // baseline rather than causing false triggers.
+      if (baseline === null){
+        baseline = level;
+      } else if (level < baseline + 16){
+        baseline = baseline * 0.9 + level * 0.1;
+      }
 
-      if (baseline !== null && elapsed > 420){
-        if (level > baseline + 18){
+      if (elapsed > 300){
+        if (level > baseline + 16){
           aboveCount++;
           if (aboveCount >= 2){ // ~160ms of sustained louder sound
             stopped = true;
@@ -589,24 +623,39 @@ function speakRaw(text, onProgress){
     const chosen = cachedVoices.find(v => v.voiceURI === store.voiceURI);
     if (chosen) u.voice = chosen;
     u.lang = 'en-US';
-    u.rate = store.rate || 1;
+    const rate = store.rate || 1;
+    u.rate = rate;
 
+    const startTime = Date.now();
     let revealTimer = null;
     function stopReveal(){ if (revealTimer) clearInterval(revealTimer); }
 
-    u.onend = () => { stopReveal(); resolve(); };
-    u.onerror = () => { stopReveal(); resolve(); };
+    function finish(){
+      stopReveal();
+      // Learn the real speaking speed for next time — normalize back to
+      // rate=1 so it stays valid even if the user changes the rate slider.
+      const actualMs = Date.now() - startTime;
+      if (actualMs > 250 && text.length > 8){
+        const actualCps = text.length / (actualMs / 1000);
+        const actualBase = actualCps / rate;
+        const prevBase = store.charsPerSecondBase;
+        store.charsPerSecondBase = prevBase * 0.6 + actualBase * 0.4; // EMA — adapts over a few turns
+      }
+      resolve();
+    }
+    u.onend = finish;
+    u.onerror = finish;
     speechSynthesis.speak(u);
 
     // onboundary (word-by-word progress) is unfortunately not reliably
     // fired by Android Chrome's TTS engine, so we simulate the reveal
-    // timing instead, based on a rough estimate of speaking rate — this
-    // still gives a "written as it's spoken" feel even without a real
-    // signal from the speech engine.
+    // timing instead, using our learned speaking-rate estimate — this
+    // still gives a "written as it's spoken" feel, and gets more accurate
+    // turn after turn as store.charsPerSecondBase self-corrects.
     if (onProgress){
       const words = text.split(/\s+/).filter(Boolean);
-      const charsPerSecond = 14 * (store.rate || 1);
-      const totalMs = Math.max(300, (text.length / charsPerSecond) * 1000);
+      const cps = store.charsPerSecondBase * rate;
+      const totalMs = Math.max(300, (text.length / cps) * 1000);
       const msPerWord = totalMs / Math.max(1, words.length);
       let idx = 0;
       revealTimer = setInterval(() => {

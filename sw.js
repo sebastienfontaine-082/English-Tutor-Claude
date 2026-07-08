@@ -1,4 +1,4 @@
-const CACHE = 'talk-shell-v15';
+const CACHE = 'talk-shell-v18';
 const SHELL = [
   './',
   './index.html',
