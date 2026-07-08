@@ -16,7 +16,7 @@
 
   <header class="topbar">
     <span class="wordmark">talk<span class="dot">.</span></span>
-    <span id="versionTag" class="versionTag">v2.9</span>
+    <span id="versionTag" class="versionTag">v3.0</span>
     <button id="settingsBtn" class="iconBtn" aria-label="Settings">⚙</button>
   </header>
 
@@ -32,7 +32,7 @@
       </button>
       <span id="semanticDot" class="semanticDot" title="Semantic end-of-sentence detector (experimental, informational only)"></span>
     </div>
-    <p id="status" class="status">Tap to start</p>
+    <p id="status" class="status"></p>
 
     <div id="userCaptionWrap" class="captionWrap zone">
       <p id="userCaption" class="caption"></p>
@@ -76,6 +76,18 @@
       <input id="pauseInput" type="range" min="800" max="4000" step="100" value="2200">
     </label>
     <p class="hint" id="pauseHint">2.2s</p>
+
+    <label class="field row">
+      <span>Barge-in (interrupt AI by talking)</span>
+      <input id="bargeInToggle" type="checkbox" checked>
+    </label>
+    <p class="hint">On Bluetooth headsets/speakers, this can cause choppy audio (Android switches to a lower-quality call profile while the mic is open). Turn it off if that happens.</p>
+
+    <label class="field row">
+      <span>Keep screen on while talking</span>
+      <input id="keepAwakeToggle" type="checkbox">
+    </label>
+    <p class="hint">Useful since captions need the screen. When off, the app tries to keep working with the screen off, but browsers don't guarantee this (unlike a real phone call) — voice recognition may pause when the screen turns off.</p>
 
     <div class="sheetActions">
       <button id="resetConvoBtn" class="ghostBtn">Reset conversation</button>

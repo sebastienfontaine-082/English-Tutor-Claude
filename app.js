@@ -11,6 +11,10 @@ const store = {
   set rate(v){ localStorage.setItem('rate', v); },
   get pauseMs(){ return parseInt(localStorage.getItem('pauseMs') || '2200', 10); },
   set pauseMs(v){ localStorage.setItem('pauseMs', v); },
+  get bargeInEnabled(){ return localStorage.getItem('bargeInEnabled') !== 'false'; }, // default on
+  set bargeInEnabled(v){ localStorage.setItem('bargeInEnabled', v); },
+  get keepAwake(){ return localStorage.getItem('keepAwake') === 'true'; }, // default off
+  set keepAwake(v){ localStorage.setItem('keepAwake', v); },
   // Learned speaking rate, normalized to rate=1 — refined after every
   // utterance so the reveal speed adapts to the real device/voice.
   get charsPerSecondBase(){ return parseFloat(localStorage.getItem('cpsBase') || '15'); },
@@ -32,9 +36,14 @@ function pickModel(text){
 
 function systemPrompt(){
   const topic = store.topic.trim();
+  const now = new Date();
+  const dateStr = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+  const timeStr = now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
   return `You are a warm, casual native English speaker having a real spoken conversation with someone practicing English. ` +
     `Talk about everyday life, ask natural follow-up questions, react like a real person (curiosity, humor, small opinions). ` +
     `Keep replies SHORT — 1 to 3 sentences, like real speech, never a lecture. ` +
+    `The real current date and time where the user is is: ${dateStr}, ${timeStr}. Use this whenever you refer to "today", ` +
+    `the day of the week, "this morning/evening", or anything time-related — never guess or invent a date. ` +
     `You have access to real-time web search — if the user asks about news, current events, ` +
     `today's date, sports results, or any fact you're unsure about, use it and answer naturally, ` +
     `still in a short spoken style, not like reading a list of headlines. ` +
@@ -139,6 +148,8 @@ const voiceSelect = document.getElementById('voiceSelect');
 const rateInput = document.getElementById('rateInput');
 const pauseInput = document.getElementById('pauseInput');
 const pauseHint = document.getElementById('pauseHint');
+const bargeInToggle = document.getElementById('bargeInToggle');
+const keepAwakeToggle = document.getElementById('keepAwakeToggle');
 
 /* ---------- Settings panel ---------- */
 
@@ -147,6 +158,8 @@ function openSettings(){
   topicInput.value = store.topic;
   rateInput.value = store.rate;
   pauseInput.value = store.pauseMs;
+  bargeInToggle.checked = store.bargeInEnabled;
+  keepAwakeToggle.checked = store.keepAwake;
   updatePauseHint();
   populateVoices();
   settingsPanel.hidden = false;
@@ -156,9 +169,13 @@ function closeSettings(){
   store.topic = topicInput.value.trim();
   store.rate = parseFloat(rateInput.value);
   store.pauseMs = parseInt(pauseInput.value, 10);
+  store.bargeInEnabled = bargeInToggle.checked;
+  store.keepAwake = keepAwakeToggle.checked;
   const v = voiceSelect.value;
   if (v) store.voiceURI = v;
   settingsPanel.hidden = true;
+  if (sessionActive && store.keepAwake) acquireWakeLock();
+  if (!store.keepAwake) releaseWakeLock();
 }
 function updatePauseHint(){
   pauseHint.textContent = (parseInt(pauseInput.value, 10) / 1000).toFixed(1) + 's';
@@ -171,7 +188,7 @@ resetConvoBtn.addEventListener('click', () => {
   saveHistory();
   setAiCaption('');
   setUserCaption('');
-  statusEl.textContent = 'Conversation reset. Tap to start';
+  statusEl.textContent = 'Conversation reset';
 });
 
 let cachedVoices = [];
@@ -308,7 +325,7 @@ function setState(s){
   const labels = { idle: 'TALK', listening: 'LISTENING', thinking: '···', speaking: 'SPEAKING' };
   btnLabel.textContent = labels[s] || 'TALK';
   const statusText = {
-    idle: 'Tap to start',
+    idle: '',
     listening: 'Listening… speak naturally',
     thinking: 'Thinking…',
     speaking: 'Speaking…',
@@ -675,10 +692,9 @@ async function speak(text){
   let spokenChars = 0;
   let bargeTriggered = false;
 
-  const stopWatch = watchForBargeIn(() => {
-    bargeTriggered = true;
-    speechSynthesis.cancel();
-  });
+  const stopWatch = store.bargeInEnabled
+    ? watchForBargeIn(() => { bargeTriggered = true; speechSynthesis.cancel(); })
+    : () => {};
 
   await speakRaw(text, (partial) => {
     spokenChars = partial.length;
@@ -701,6 +717,22 @@ async function speak(text){
   setAiCaption(text);
   listen();
 }
+
+/* ---------- Screen wake lock ---------- */
+
+let wakeLock = null;
+async function acquireWakeLock(){
+  if (!('wakeLock' in navigator)) return;
+  try{
+    wakeLock = await navigator.wakeLock.request('screen');
+  }catch(e){ /* e.g. tab not visible — will retry on visibilitychange */ }
+}
+function releaseWakeLock(){
+  if (wakeLock){ try{ wakeLock.release(); }catch(e){} wakeLock = null; }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && sessionActive && store.keepAwake) acquireWakeLock();
+});
 
 /* ---------- Session control ---------- */
 
@@ -725,14 +757,7 @@ async function startSession(){
   }
 
   sessionActive = true;
-
-  // Instant local welcome — no network needed — confirms TTS works
-  // even before we contact Groq for the real conversation opener.
-  setState('speaking');
-  setActiveZone('ai');
-  setAiCaption('');
-  await speakRaw("Hi! Let's talk.", setAiCaption);
-  if (!sessionActive) return; // user tapped the orb to end during the welcome
+  if (store.keepAwake) acquireWakeLock();
 
   if (history.length === 0){
     // AI opens the conversation
@@ -759,6 +784,7 @@ function endSession(){
   setActiveZone(null);
   clearTimeout(semanticCheckTimer);
   setSemanticIndicator('unknown');
+  releaseWakeLock();
   setState('idle');
 }
 
