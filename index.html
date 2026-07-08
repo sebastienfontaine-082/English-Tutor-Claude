@@ -16,7 +16,7 @@
 
   <header class="topbar">
     <span class="wordmark">talk<span class="dot">.</span></span>
-    <span id="versionTag" class="versionTag">v3.0</span>
+    <span id="versionTag" class="versionTag">v3.1</span>
     <button id="settingsBtn" class="iconBtn" aria-label="Settings">⚙</button>
   </header>
 
@@ -79,9 +79,9 @@
 
     <label class="field row">
       <span>Barge-in (interrupt AI by talking)</span>
-      <input id="bargeInToggle" type="checkbox" checked>
+      <input id="bargeInToggle" type="checkbox">
     </label>
-    <p class="hint">On Bluetooth headsets/speakers, this can cause choppy audio (Android switches to a lower-quality call profile while the mic is open). Turn it off if that happens.</p>
+    <p class="hint">Experimental. Keeping the mic open while the AI talks can make Android process audio like a phone call, causing choppy/glitchy speech — with or without Bluetooth. Off by default; try it and turn it back off if you hear that.</p>
 
     <label class="field row">
       <span>Keep screen on while talking</span>

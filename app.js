@@ -11,7 +11,7 @@ const store = {
   set rate(v){ localStorage.setItem('rate', v); },
   get pauseMs(){ return parseInt(localStorage.getItem('pauseMs') || '2200', 10); },
   set pauseMs(v){ localStorage.setItem('pauseMs', v); },
-  get bargeInEnabled(){ return localStorage.getItem('bargeInEnabled') !== 'false'; }, // default on
+  get bargeInEnabled(){ return localStorage.getItem('bargeInEnabled') === 'true'; }, // default off — degrades TTS audio even without Bluetooth
   set bargeInEnabled(v){ localStorage.setItem('bargeInEnabled', v); },
   get keepAwake(){ return localStorage.getItem('keepAwake') === 'true'; }, // default off
   set keepAwake(v){ localStorage.setItem('keepAwake', v); },
