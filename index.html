@@ -16,7 +16,7 @@
 
   <header class="topbar">
     <span class="wordmark">talk<span class="dot">.</span></span>
-    <span id="versionTag" class="versionTag">v3.4</span>
+    <span id="versionTag" class="versionTag">v3.5</span>
     <button id="settingsBtn" class="iconBtn" aria-label="Settings">⚙</button>
   </header>
 
@@ -34,9 +34,13 @@
     </div>
     <p id="status" class="status"></p>
 
+    <div class="camRow">
+      <video id="camPreview" class="camPreview" autoplay muted playsinline hidden></video>
+      <span id="lipReadout" class="lipReadout" hidden></span>
+    </div>
+
     <div id="userCaptionWrap" class="captionWrap zone">
       <p id="userCaption" class="caption"></p>
-      <video id="camPreview" class="camPreview" autoplay muted playsinline hidden></video>
     </div>
   </main>
 

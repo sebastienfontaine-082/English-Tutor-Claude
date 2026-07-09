@@ -19,6 +19,10 @@ const store = {
   // utterance so the reveal speed adapts to the real device/voice.
   get charsPerSecondBase(){ return parseFloat(localStorage.getItem('cpsBase') || '15'); },
   set charsPerSecondBase(v){ localStorage.setItem('cpsBase', v); },
+  // Self-tuning lip-movement sensitivity threshold — adjusted based on
+  // how often the video signal actually helps vs. false-triggers.
+  get lipThreshold(){ return parseFloat(localStorage.getItem('lipThreshold') || '0.045'); },
+  set lipThreshold(v){ localStorage.setItem('lipThreshold', v); },
 };
 
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
@@ -151,6 +155,7 @@ const pauseHint = document.getElementById('pauseHint');
 const keepAwakeToggle = document.getElementById('keepAwakeToggle');
 const lipDetectToggle = document.getElementById('lipDetectToggle');
 const camPreviewEl = document.getElementById('camPreview');
+const lipReadoutEl = document.getElementById('lipReadout');
 
 /* ---------- Settings panel ---------- */
 
@@ -392,9 +397,27 @@ function listen(){
     recognition.onend = () => {
       if (!sessionActive || vizState !== 'listening') return;
       const silentFor = Date.now() - lastSpeechTime;
-      if (accumulated.trim() && silentFor >= silenceMs()){
+      const thresholdUsed = silenceMs();
+      if (accumulated.trim() && silentFor >= thresholdUsed){
         const text = accumulated.trim();
         accumulated = '';
+
+        // Adaptive lip-threshold tuning: if a face is visible but we still
+        // ended up waiting the long pause repeatedly, the lip signal isn't
+        // helping — make it more sensitive. Any shortened finalize resets
+        // the streak (the signal is doing its job).
+        if (lipState !== 'no-face'){
+          if (thresholdUsed <= 1400){
+            longWaitStreak = 0;
+          } else {
+            longWaitStreak++;
+            if (longWaitStreak >= 3){
+              store.lipThreshold = Math.max(0.01, store.lipThreshold * 0.8);
+              longWaitStreak = 0;
+            }
+          }
+        }
+
         handleUserUtterance(text);
       } else {
         // Either mid-utterance pause (short native gap) or nothing said
@@ -619,10 +642,11 @@ function ensureFaceLandmarker(){
 let camStream = null;
 let lipLoopTimer = null;
 let lipState = 'no-face'; // 'no-face' | 'still' | 'moving'
+let longWaitStreak = 0;   // consecutive turns finalized via the long pause despite a visible face
+let earlyBargeStreak = 0; // consecutive very-early (likely false-positive) barge-ins
 let mouthBuffer = [];
 
 const MOUTH_UPPER = 13, MOUTH_LOWER = 14, EYE_L = 33, EYE_R = 263;
-const MOVING_THRESHOLD = 0.045; // normalized units — will likely need real-device tuning
 const BUFFER_MS = 650;
 
 function dist(a, b){ return Math.hypot(a.x - b.x, a.y - b.y); }
@@ -640,6 +664,7 @@ async function startLipWatch(){
 
   camPreviewEl.srcObject = camStream;
   camPreviewEl.hidden = false;
+  lipReadoutEl.hidden = false;
 
   const landmarker = await ensureFaceLandmarker();
   if (!landmarker || !camStream){ stopLipWatch(); return; }
@@ -653,6 +678,7 @@ async function startLipWatch(){
     if (!result || !result.faceLandmarks || !result.faceLandmarks.length){
       lipState = 'no-face';
       mouthBuffer = [];
+      lipReadoutEl.textContent = 'no face';
       return;
     }
 
@@ -667,7 +693,8 @@ async function startLipWatch(){
     if (mouthBuffer.length >= 3){
       const vals = mouthBuffer.map(s => s.v);
       const range = Math.max(...vals) - Math.min(...vals);
-      lipState = range > MOVING_THRESHOLD ? 'moving' : 'still';
+      lipState = range > store.lipThreshold ? 'moving' : 'still';
+      lipReadoutEl.textContent = `${range.toFixed(3)} / thr ${store.lipThreshold.toFixed(3)} — ${lipState}`;
     }
   }, 100); // ~10Hz — plenty for mouth movement, easy on battery
 }
@@ -679,6 +706,7 @@ function stopLipWatch(){
   camStream = null;
   camPreviewEl.hidden = true;
   camPreviewEl.srcObject = null;
+  lipReadoutEl.hidden = true;
   lipState = 'no-face';
   mouthBuffer = [];
 }
@@ -704,6 +732,7 @@ async function speak(text){
 
   let spokenChars = 0;
   let bargeTriggered = false;
+  const speakStart = Date.now();
   const stopWatch = watchForVisualBargeIn(() => { bargeTriggered = true; speechSynthesis.cancel(); });
 
   await speakRaw(text, (partial) => { spokenChars = partial.length; setAiCaption(partial); });
@@ -717,7 +746,8 @@ async function speak(text){
 
   if (bargeTriggered){
     const fraction = text.length ? spokenChars / text.length : 0;
-    handleBargeIn(text.slice(0, spokenChars).trim(), fraction);
+    const elapsedMs = Date.now() - speakStart;
+    handleBargeIn(text.slice(0, spokenChars).trim(), fraction, elapsedMs);
     return;
   }
 
@@ -730,8 +760,21 @@ async function speak(text){
 // than "a deliberate interruption".
 const BARGE_IN_EARLY_FRACTION = 0.25;
 
-function handleBargeIn(spokenPortion, fraction){
+function handleBargeIn(spokenPortion, fraction, elapsedMs){
   setAiCaption(spokenPortion || '(interrupted)');
+
+  // Adaptive lip-threshold tuning: a barge-in firing very soon after the
+  // AI started talking is more likely a false trigger (oversensitive)
+  // than a genuine cut — if it keeps happening, make it less sensitive.
+  if (elapsedMs < 1500){
+    earlyBargeStreak++;
+    if (earlyBargeStreak >= 2){
+      store.lipThreshold = store.lipThreshold * 1.25;
+      earlyBargeStreak = 0;
+    }
+  } else {
+    earlyBargeStreak = 0;
+  }
 
   if (fraction < BARGE_IN_EARLY_FRACTION){
     if (history.length && history[history.length - 1].role === 'assistant'){

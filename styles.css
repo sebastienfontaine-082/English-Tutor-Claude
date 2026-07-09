@@ -165,19 +165,30 @@ html, body{
 }
 .captionWrap::-webkit-scrollbar{ display: none; }
 
+.camRow{
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 20px;
+  flex-shrink: 0;
+}
+
 .camPreview{
-  position: absolute;
-  top: 6px;
-  right: 6px;
-  width: 44px;
-  height: 44px;
+  width: 40px;
+  height: 40px;
   border-radius: 10px;
   object-fit: cover;
   transform: scaleX(-1); /* mirror, feels natural like a selfie view */
   border: 1px solid var(--line);
-  box-shadow: 0 2px 8px rgba(0,0,0,0.4);
-  z-index: 4;
   background: #000;
+}
+
+.lipReadout{
+  font-size: 11px;
+  font-family: "Courier New", monospace;
+  color: var(--text-dim);
+  letter-spacing: 0.02em;
 }
 
 .caption{
