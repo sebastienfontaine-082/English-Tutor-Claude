@@ -16,7 +16,7 @@
 
   <header class="topbar">
     <span class="wordmark">talk<span class="dot">.</span></span>
-    <span id="versionTag" class="versionTag">v3.5</span>
+    <span id="versionTag" class="versionTag">v3.6</span>
     <button id="settingsBtn" class="iconBtn" aria-label="Settings">⚙</button>
   </header>
 
@@ -30,13 +30,16 @@
       <button id="mainBtn" class="mainBtn" aria-label="Start or end conversation">
         <span id="btnLabel">TALK</span>
       </button>
-      <span id="semanticDot" class="semanticDot" title="Semantic end-of-sentence detector (experimental, informational only)"></span>
     </div>
     <p id="status" class="status"></p>
 
-    <div class="camRow">
-      <video id="camPreview" class="camPreview" autoplay muted playsinline hidden></video>
-      <span id="lipReadout" class="lipReadout" hidden></span>
+    <div id="debugPanel" class="debugPanel">
+      <p id="dbgPhase" class="dbgLine dbgPhase"></p>
+      <p id="dbgHeuristic" class="dbgLine"></p>
+      <div class="camRow">
+        <video id="camPreview" class="camPreview" autoplay muted playsinline hidden></video>
+        <p id="lipReadout" class="dbgLine dbgLips" hidden></p>
+      </div>
     </div>
 
     <div id="userCaptionWrap" class="captionWrap zone">

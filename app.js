@@ -21,8 +21,8 @@ const store = {
   set charsPerSecondBase(v){ localStorage.setItem('cpsBase', v); },
   // Self-tuning lip-movement sensitivity threshold — adjusted based on
   // how often the video signal actually helps vs. false-triggers.
-  get lipThreshold(){ return parseFloat(localStorage.getItem('lipThreshold') || '0.045'); },
-  set lipThreshold(v){ localStorage.setItem('lipThreshold', v); },
+  get lipThreshold(){ return parseFloat(localStorage.getItem('lipThresholdV2') || '0.06'); },
+  set lipThreshold(v){ localStorage.setItem('lipThresholdV2', v); },
 };
 
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
@@ -76,6 +76,8 @@ loadHistory();
 const mainBtn = document.getElementById('mainBtn');
 const btnLabel = document.getElementById('btnLabel');
 const statusEl = document.getElementById('status');
+const dbgPhaseEl = document.getElementById('dbgPhase');
+const dbgHeuristicEl = document.getElementById('dbgHeuristic');
 const aiCaptionEl = document.getElementById('aiCaption');
 const aiCaptionWrapEl = document.getElementById('aiCaptionWrap');
 const userCaptionEl = document.getElementById('userCaption');
@@ -100,15 +102,27 @@ function setActiveZone(which){
   userCaptionWrapEl.classList.toggle('active', which === 'user');
 }
 
-/* ---------- Semantic end-of-sentence indicator (passive, informational only) ---------- */
+/* ---------- Debug panel — every dialogue-dynamics state, in plain text ---------- */
 
-const semanticDotEl = document.getElementById('semanticDot');
+function setPhase(text){
+  dbgPhaseEl.textContent = text;
+}
+
+function updateDebugPanel(){
+  const labels = {
+    unknown: 'Heuristic: —',
+    complete: 'Heuristic: sentence looks complete',
+    incomplete: 'Heuristic: sentence unfinished',
+  };
+  dbgHeuristicEl.textContent = labels[lastSemanticState] || labels.unknown;
+}
+
+/* ---------- Semantic end-of-sentence heuristic (no visual dot — used as a fallback signal and reported in the debug panel) ---------- */
+
 let lastSemanticState = 'unknown';
 function setSemanticIndicator(state){
   lastSemanticState = state;
-  semanticDotEl.classList.remove('complete', 'incomplete');
-  if (state === 'complete') semanticDotEl.classList.add('complete');
-  else if (state === 'incomplete') semanticDotEl.classList.add('incomplete');
+  updateDebugPanel();
 }
 
 let semanticCheckTimer = null;
@@ -324,11 +338,13 @@ function buildRecognition(){
 // that recovers gracefully on the rarer cases where that guess is wrong.
 function silenceMs(){
   const base = store.pauseMs;
-  // Lip signal only counts when a face is actually in frame — otherwise
-  // we fall back to heuristic+timer alone, as intended.
-  if (lipState === 'moving') return Math.max(base, 4000); // visibly still talking — strong signal, overrides the word heuristic
+  // Lips take priority whenever a face is actually visible — they're a
+  // direct physical signal, more trustworthy than the crude word list.
+  // Only fall back to the heuristic when there's no face in frame at all.
+  if (lipState === 'moving') return Math.max(base, 4000);
+  if (lipState === 'still') return Math.min(base, 1400);
   if (lastSemanticState === 'incomplete') return Math.max(base, 4000);
-  if (lipState === 'still' || lastSemanticState === 'complete') return Math.min(base, 1400);
+  if (lastSemanticState === 'complete') return Math.min(base, 1400);
   return base;
 }
 
@@ -355,6 +371,7 @@ function listen(){
   setUserCaption('');
   setActiveZone('user');
   setSemanticIndicator('unknown');
+  setPhase('Sentence in progress…');
 
   function startChunk(){
     if (!sessionActive) return;
@@ -418,6 +435,8 @@ function listen(){
           }
         }
 
+        const kind = thresholdUsed <= 1400 ? 'short' : (thresholdUsed >= 4000 ? 'long' : 'baseline');
+        setPhase(`Pause confirmed (${kind}, ${(thresholdUsed/1000).toFixed(1)}s) → sending`);
         handleUserUtterance(text);
       } else {
         // Either mid-utterance pause (short native gap) or nothing said
@@ -442,6 +461,7 @@ function pushAssistantReply(reply){
 async function handleUserUtterance(text){
   if (text.length > 1000) text = text.slice(0, 1000); // safety cap, avoids oversized requests
   setState('thinking');
+  setPhase('Thinking (contacting AI)…');
 
   if (pendingMerge){
     // The app likely cut the user off mid-thought during the previous
@@ -646,7 +666,7 @@ let longWaitStreak = 0;   // consecutive turns finalized via the long pause desp
 let earlyBargeStreak = 0; // consecutive very-early (likely false-positive) barge-ins
 let mouthBuffer = [];
 
-const MOUTH_UPPER = 13, MOUTH_LOWER = 14, EYE_L = 33, EYE_R = 263;
+const MOUTH_UPPER = 13, MOUTH_LOWER = 14, MOUTH_LEFT = 61, MOUTH_RIGHT = 291;
 const BUFFER_MS = 650;
 
 function dist(a, b){ return Math.hypot(a.x - b.x, a.y - b.y); }
@@ -683,8 +703,8 @@ async function startLipWatch(){
     }
 
     const lm = result.faceLandmarks[0];
-    const eyeDist = dist(lm[EYE_L], lm[EYE_R]) || 1;
-    const mouthOpen = dist(lm[MOUTH_UPPER], lm[MOUTH_LOWER]) / eyeDist;
+    const mouthWidth = dist(lm[MOUTH_LEFT], lm[MOUTH_RIGHT]) || 1;
+    const mouthOpen = dist(lm[MOUTH_UPPER], lm[MOUTH_LOWER]) / mouthWidth;
 
     const now = Date.now();
     mouthBuffer.push({ t: now, v: mouthOpen });
@@ -729,6 +749,7 @@ async function speak(text){
   setState('speaking');
   setActiveZone('ai');
   setAiCaption('');
+  setPhase('AI speaking…');
 
   let spokenChars = 0;
   let bargeTriggered = false;
@@ -777,12 +798,14 @@ function handleBargeIn(spokenPortion, fraction, elapsedMs){
   }
 
   if (fraction < BARGE_IN_EARLY_FRACTION){
+    setPhase('Barge-in: accidental cutoff detected — merging');
     if (history.length && history[history.length - 1].role === 'assistant'){
       history.pop(); // discard the premature reply entirely
       saveHistory();
     }
     pendingMerge = true;
   } else {
+    setPhase('Barge-in: voluntary interruption detected');
     if (history.length && history[history.length - 1].role === 'assistant'){
       history[history.length - 1].content = spokenPortion || '(cut short)';
       saveHistory();
@@ -862,6 +885,7 @@ function endSession(){
   setSemanticIndicator('unknown');
   releaseWakeLock();
   stopLipWatch();
+  setPhase('');
   setState('idle');
 }
 
@@ -874,6 +898,7 @@ mainBtn.addEventListener('click', () => {
 
 resizeCanvas();
 setState('idle');
+updateDebugPanel();
 drawOrb();
 
 if ('serviceWorker' in navigator){
