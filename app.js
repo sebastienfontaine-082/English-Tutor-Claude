@@ -9,7 +9,7 @@ const store = {
   set voiceURI(v){ localStorage.setItem('voiceURI', v); },
   get rate(){ return parseFloat(localStorage.getItem('rate') || '1'); },
   set rate(v){ localStorage.setItem('rate', v); },
-  get pauseMs(){ return parseInt(localStorage.getItem('pauseMs') || '2200', 10); },
+  get pauseMs(){ return parseInt(localStorage.getItem('pauseMs') || '800', 10); },
   set pauseMs(v){ localStorage.setItem('pauseMs', v); },
   get keepAwake(){ return localStorage.getItem('keepAwake') === 'true'; }, // default off
   set keepAwake(v){ localStorage.setItem('keepAwake', v); },
@@ -337,14 +337,11 @@ function buildRecognition(){
 // If it looks finished, we finalize sooner — barge-in is the safety net
 // that recovers gracefully on the rarer cases where that guess is wrong.
 function silenceMs(){
+  // The setting is now itself the fast/default path — we only stretch it
+  // out when a signal clearly suggests the sentence is still going.
   const base = store.pauseMs;
-  // Lips take priority whenever a face is actually visible — they're a
-  // direct physical signal, more trustworthy than the crude word list.
-  // Only fall back to the heuristic when there's no face in frame at all.
   if (lipState === 'moving') return Math.max(base, 4000);
-  if (lipState === 'still') return Math.min(base, 1400);
-  if (lastSemanticState === 'incomplete') return Math.max(base, 4000);
-  if (lastSemanticState === 'complete') return Math.min(base, 1400);
+  if (lipState !== 'still' && lastSemanticState === 'incomplete') return Math.max(base, 4000);
   return base;
 }
 
@@ -363,11 +360,12 @@ function setState(s){
   statusEl.textContent = statusText[s] || '';
 }
 
-function listen(){
+function listen(resumeCallback){
   if (!sessionActive) return;
 
   let accumulated = '';
   let lastSpeechTime = Date.now();
+  const listenStartTime = Date.now();
   setUserCaption('');
   setActiveZone('user');
   setSemanticIndicator('unknown');
@@ -404,6 +402,11 @@ function listen(){
         endSession();
         return;
       }
+      if (e.error === 'network' && !navigator.onLine){
+        setOfflineUI(true);
+        pausedForOffline = true;
+        return; // don't loop-retry while offline — the 'online' listener resumes us
+      }
       if (e.error !== 'no-speech' && e.error !== 'aborted'){
         console.warn('SpeechRecognition error:', e.error);
       }
@@ -412,19 +415,21 @@ function listen(){
     };
 
     recognition.onend = () => {
-      if (!sessionActive || vizState !== 'listening') return;
+      if (!sessionActive || vizState !== 'listening' || pausedForOffline) return;
       const silentFor = Date.now() - lastSpeechTime;
       const thresholdUsed = silenceMs();
+      const wasLong = thresholdUsed >= 4000;
+
       if (accumulated.trim() && silentFor >= thresholdUsed){
         const text = accumulated.trim();
         accumulated = '';
 
         // Adaptive lip-threshold tuning: if a face is visible but we still
         // ended up waiting the long pause repeatedly, the lip signal isn't
-        // helping — make it more sensitive. Any shortened finalize resets
-        // the streak (the signal is doing its job).
+        // helping — make it more sensitive. Any fast finalize resets the
+        // streak (the signal is doing its job).
         if (lipState !== 'no-face'){
-          if (thresholdUsed <= 1400){
+          if (!wasLong){
             longWaitStreak = 0;
           } else {
             longWaitStreak++;
@@ -435,9 +440,12 @@ function listen(){
           }
         }
 
-        const kind = thresholdUsed <= 1400 ? 'short' : (thresholdUsed >= 4000 ? 'long' : 'baseline');
-        setPhase(`Pause confirmed (${kind}, ${(thresholdUsed/1000).toFixed(1)}s) → sending`);
+        setPhase(`Pause confirmed (${wasLong ? 'long' : 'fast'}, ${(thresholdUsed/1000).toFixed(1)}s) → sending`);
         handleUserUtterance(text);
+      } else if (resumeCallback && !accumulated.trim() && Date.now() - listenStartTime >= store.pauseMs){
+        // Nothing said at all since the barge-in triggered — it was a
+        // false alarm. Stop waiting and let the AI resume its sentence.
+        resumeCallback();
       } else {
         // Either mid-utterance pause (short native gap) or nothing said
         // yet — start the next short chunk to keep listening.
@@ -792,7 +800,7 @@ async function speak(text){
   if (bargeTriggered){
     const fraction = text.length ? spokenChars / text.length : 0;
     const elapsedMs = Date.now() - speakStart;
-    handleBargeIn(text.slice(0, spokenChars).trim(), fraction, elapsedMs);
+    handleBargeIn(text.slice(0, spokenChars).trim(), fraction, elapsedMs, text);
     return;
   }
 
@@ -805,7 +813,7 @@ async function speak(text){
 // than "a deliberate interruption".
 const BARGE_IN_EARLY_FRACTION = 0.25;
 
-function handleBargeIn(spokenPortion, fraction, elapsedMs){
+function handleBargeIn(spokenPortion, fraction, elapsedMs, fullText){
   setAiCaption(spokenPortion || '(interrupted)');
 
   // Adaptive lip-threshold tuning: a barge-in firing very soon after the
@@ -823,19 +831,40 @@ function handleBargeIn(spokenPortion, fraction, elapsedMs){
 
   if (fraction < BARGE_IN_EARLY_FRACTION){
     setPhase('Barge-in: accidental cutoff detected — merging');
-    if (history.length && history[history.length - 1].role === 'assistant'){
-      history.pop(); // discard the premature reply entirely
+    const discardedReply = (history.length && history[history.length - 1].role === 'assistant')
+      ? history[history.length - 1].content : null;
+    if (discardedReply !== null){
+      history.pop(); // discard the premature reply for now — restored below if this was a false alarm
       saveHistory();
     }
     pendingMerge = true;
-  } else {
-    setPhase('Barge-in: voluntary interruption detected');
-    if (history.length && history[history.length - 1].role === 'assistant'){
-      history[history.length - 1].content = spokenPortion || '(cut short)';
-      saveHistory();
-    }
-    pendingInterruptionNote = true;
+
+    const remainder = fullText.slice(spokenPortion.length).trim();
+    listen(() => {
+      // No continuation came within the pause window — false alarm.
+      // The AI didn't actually get cut off; let it finish its sentence.
+      pendingMerge = false;
+      setPhase('No continuation heard — resuming AI reply');
+      if (discardedReply !== null){
+        history.push({ role: 'assistant', content: discardedReply });
+        saveHistory();
+      }
+      if (remainder){
+        speak(remainder);
+      } else {
+        setAiCaption(discardedReply || '');
+        listen();
+      }
+    });
+    return;
   }
+
+  setPhase('Barge-in: voluntary interruption detected');
+  if (history.length && history[history.length - 1].role === 'assistant'){
+    history[history.length - 1].content = spokenPortion || '(cut short)';
+    saveHistory();
+  }
+  pendingInterruptionNote = true;
 
   listen();
 }
@@ -901,6 +930,33 @@ async function startSession(){
   }
 }
 
+/* ---------- Network connectivity monitoring ---------- */
+
+let pausedForOffline = false;
+
+function setOfflineUI(offline){
+  mainBtn.classList.toggle('offline', offline);
+  if (offline){
+    statusEl.textContent = 'Network hiccup — check your connection and tap TALK to try again';
+  } else if (statusEl.textContent.startsWith('Network hiccup')){
+    statusEl.textContent = '';
+  }
+}
+
+window.addEventListener('offline', () => {
+  setOfflineUI(true);
+  pausedForOffline = true;
+});
+
+window.addEventListener('online', () => {
+  setOfflineUI(false);
+  if (sessionActive && pausedForOffline){
+    pausedForOffline = false;
+    if (recognition) try{ recognition.stop(); }catch(e){}
+    listen();
+  }
+});
+
 function endSession(){
   sessionActive = false;
   if (recognition) try{ recognition.stop(); }catch(e){}
@@ -921,6 +977,7 @@ mainBtn.addEventListener('click', () => {
 
 /* ---------- Boot ---------- */
 
+setOfflineUI(!navigator.onLine);
 resizeCanvas();
 setState('idle');
 updateDebugPanel();

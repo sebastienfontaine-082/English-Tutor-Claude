@@ -116,6 +116,8 @@ html, body{
 .mainBtn.listening{ box-shadow: 0 0 0 1px var(--listen), 0 0 40px -6px var(--listen); }
 .mainBtn.thinking{ box-shadow: 0 0 0 1px var(--think), 0 0 30px -8px var(--think); }
 .mainBtn.speaking{ box-shadow: 0 0 0 1px var(--speak), 0 0 40px -6px var(--speak); }
+.mainBtn.offline{ box-shadow: 0 0 0 2px var(--danger), 0 0 40px -6px var(--danger); animation: offlinePulse 1.6s ease-in-out infinite; }
+@keyframes offlinePulse{ 0%,100%{ opacity: 1; } 50%{ opacity: 0.75; } }
 
 .status{
   font-size: 14px;
