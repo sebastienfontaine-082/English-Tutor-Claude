@@ -366,13 +366,72 @@ function listen(resumeCallback){
   let accumulated = '';
   let lastSpeechTime = Date.now();
   const listenStartTime = Date.now();
+  let finalized = false;
+  let watchdogTimer = null;
+
   setUserCaption('');
   setActiveZone('user');
   setSemanticIndicator('unknown');
   setPhase('Sentence in progress…');
 
+  function cleanupWatchdog(){
+    if (watchdogTimer) clearInterval(watchdogTimer);
+    watchdogTimer = null;
+  }
+
+  function finalizeUtterance(){
+    if (finalized) return;
+    finalized = true;
+    cleanupWatchdog();
+    if (recognition) try{ recognition.stop(); }catch(e){}
+
+    const text = accumulated.trim();
+    const thresholdUsed = silenceMs();
+    const wasLong = thresholdUsed >= 4000;
+
+    // Adaptive lip-threshold tuning: if a face is visible but we still
+    // ended up waiting the long pause repeatedly, the lip signal isn't
+    // helping — make it more sensitive. Any fast finalize resets the
+    // streak (the signal is doing its job).
+    if (lipState !== 'no-face'){
+      if (!wasLong){
+        longWaitStreak = 0;
+      } else {
+        longWaitStreak++;
+        if (longWaitStreak >= 3){
+          store.lipThreshold = Math.max(0.01, store.lipThreshold * 0.8);
+          longWaitStreak = 0;
+        }
+      }
+    }
+
+    setPhase(`Pause confirmed (${wasLong ? 'long' : 'fast'}, ${(thresholdUsed/1000).toFixed(1)}s) → sending`);
+    handleUserUtterance(text);
+  }
+
+  function giveUpAndResume(){
+    if (finalized) return;
+    finalized = true;
+    cleanupWatchdog();
+    if (recognition) try{ recognition.stop(); }catch(e){}
+    resumeCallback();
+  }
+
+  // Checks elapsed silence on our own clock, independently of Chrome's
+  // recognition cycle (which can take 1-2s to fire onend by itself —
+  // far slower than a short configured pause tolerance).
+  watchdogTimer = setInterval(() => {
+    if (finalized || !sessionActive || vizState !== 'listening' || pausedForOffline) return;
+    const silentFor = Date.now() - lastSpeechTime;
+    if (accumulated.trim() && silentFor >= silenceMs()){
+      finalizeUtterance();
+    } else if (resumeCallback && !accumulated.trim() && Date.now() - listenStartTime >= store.pauseMs){
+      giveUpAndResume();
+    }
+  }, 150);
+
   function startChunk(){
-    if (!sessionActive) return;
+    if (!sessionActive || finalized) return;
     recognition = buildRecognition();
 
     recognition.onstart = () => setState('listening');
@@ -411,46 +470,15 @@ function listen(resumeCallback){
         console.warn('SpeechRecognition error:', e.error);
       }
       // onend fires right after onerror in all these cases — let it decide
-      // whether to finalize or start the next chunk.
+      // whether to restart the chunk.
     };
 
     recognition.onend = () => {
-      if (!sessionActive || vizState !== 'listening' || pausedForOffline) return;
-      const silentFor = Date.now() - lastSpeechTime;
-      const thresholdUsed = silenceMs();
-      const wasLong = thresholdUsed >= 4000;
-
-      if (accumulated.trim() && silentFor >= thresholdUsed){
-        const text = accumulated.trim();
-        accumulated = '';
-
-        // Adaptive lip-threshold tuning: if a face is visible but we still
-        // ended up waiting the long pause repeatedly, the lip signal isn't
-        // helping — make it more sensitive. Any fast finalize resets the
-        // streak (the signal is doing its job).
-        if (lipState !== 'no-face'){
-          if (!wasLong){
-            longWaitStreak = 0;
-          } else {
-            longWaitStreak++;
-            if (longWaitStreak >= 3){
-              store.lipThreshold = Math.max(0.01, store.lipThreshold * 0.8);
-              longWaitStreak = 0;
-            }
-          }
-        }
-
-        setPhase(`Pause confirmed (${wasLong ? 'long' : 'fast'}, ${(thresholdUsed/1000).toFixed(1)}s) → sending`);
-        handleUserUtterance(text);
-      } else if (resumeCallback && !accumulated.trim() && Date.now() - listenStartTime >= store.pauseMs){
-        // Nothing said at all since the barge-in triggered — it was a
-        // false alarm. Stop waiting and let the AI resume its sentence.
-        resumeCallback();
-      } else {
-        // Either mid-utterance pause (short native gap) or nothing said
-        // yet — start the next short chunk to keep listening.
-        startChunk();
-      }
+      // The watchdog above is what actually decides when to finalize —
+      // this just keeps the recognition chunks chained for as long as
+      // we're still waiting.
+      if (finalized || !sessionActive || vizState !== 'listening' || pausedForOffline) return;
+      startChunk();
     };
 
     try{ recognition.start(); }catch(e){ /* already running, ignore */ }
@@ -622,33 +650,17 @@ function speakRaw(text, onProgress){
     const rate = store.rate || 1;
     u.rate = rate;
 
-    const startTime = Date.now();
+    let speechStartTime = null;
     let revealTimer = null;
     function stopReveal(){ if (revealTimer) clearInterval(revealTimer); }
 
-    function finish(){
-      stopReveal();
-      // Learn the real speaking speed for next time — normalize back to
-      // rate=1 so it stays valid even if the user changes the rate slider.
-      const actualMs = Date.now() - startTime;
-      if (actualMs > 250 && text.length > 8){
-        const actualCps = text.length / (actualMs / 1000);
-        const actualBase = actualCps / rate;
-        const prevBase = store.charsPerSecondBase;
-        store.charsPerSecondBase = prevBase * 0.6 + actualBase * 0.4; // EMA — adapts over a few turns
-      }
-      resolve();
-    }
-    u.onend = finish;
-    u.onerror = finish;
-    speechSynthesis.speak(u);
-
     // onboundary (word-by-word progress) is unfortunately not reliably
     // fired by Android Chrome's TTS engine, so we simulate the reveal
-    // timing instead, using our learned speaking-rate estimate — this
-    // still gives a "written as it's spoken" feel, and gets more accurate
-    // turn after turn as store.charsPerSecondBase self-corrects.
-    if (onProgress){
+    // timing instead, anchored to the real moment speech actually starts
+    // (onstart) rather than when we merely requested it — engine startup
+    // latency was otherwise the main source of the caption/voice desync.
+    function startReveal(){
+      if (!onProgress || revealTimer) return;
       const words = text.split(/\s+/).filter(Boolean);
       const cps = store.charsPerSecondBase * rate;
       const totalMs = Math.max(300, (text.length / cps) * 1000);
@@ -660,6 +672,35 @@ function speakRaw(text, onProgress){
         if (idx >= words.length) stopReveal();
       }, msPerWord);
     }
+
+    function finish(){
+      stopReveal();
+      // Learn the real speaking speed for next time — normalize back to
+      // rate=1 so it stays valid even if the user changes the rate slider.
+      // Measured from actual speech onset, not from when we called speak().
+      if (speechStartTime !== null){
+        const actualMs = Date.now() - speechStartTime;
+        if (actualMs > 250 && text.length > 8){
+          const actualCps = text.length / (actualMs / 1000);
+          const actualBase = actualCps / rate;
+          const prevBase = store.charsPerSecondBase;
+          store.charsPerSecondBase = prevBase * 0.6 + actualBase * 0.4; // EMA — adapts over a few turns
+        }
+      }
+      resolve();
+    }
+
+    u.onstart = () => {
+      speechStartTime = Date.now();
+      startReveal();
+    };
+    u.onend = finish;
+    u.onerror = finish;
+    speechSynthesis.speak(u);
+
+    // Fallback in case onstart never fires on some device/voice — don't
+    // leave the caption blank for the whole utterance.
+    setTimeout(() => { if (speechStartTime === null) startReveal(); }, 400);
   });
 }
 
