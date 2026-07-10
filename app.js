@@ -458,6 +458,14 @@ function pushAssistantReply(reply){
   return capped;
 }
 
+function friendlyError(err){
+  const msg = err?.message || 'Connection error';
+  if (msg.includes('Failed to fetch') || msg.includes('NetworkError')){
+    return 'Network hiccup — check your connection and tap TALK to try again';
+  }
+  return msg;
+}
+
 async function handleUserUtterance(text){
   if (text.length > 1000) text = text.slice(0, 1000); // safety cap, avoids oversized requests
   setState('thinking');
@@ -490,8 +498,9 @@ async function handleUserUtterance(text){
     speak(capped);
   }catch(err){
     console.error(err);
-    statusEl.textContent = err.message || 'Connection error';
-    setAiCaption('⚠ ' + (err.message || 'Connection error'));
+    const msg = friendlyError(err);
+    statusEl.textContent = msg;
+    setAiCaption('⚠ ' + msg);
     setActiveZone('ai');
     setState('idle');
     sessionActive = false;
@@ -499,6 +508,21 @@ async function handleUserUtterance(text){
 }
 
 /* ---------- Groq ---------- */
+
+// Retries only on network-level failures (fetch() itself rejecting —
+// "Failed to fetch" and the like), not on HTTP error responses (429,
+// 413, etc.), which already have their own specific handling below.
+async function fetchWithRetry(url, opts, retries = 1){
+  try{
+    return await fetch(url, opts);
+  }catch(err){
+    if (retries > 0){
+      await new Promise(r => setTimeout(r, 700));
+      return fetchWithRetry(url, opts, retries - 1);
+    }
+    throw err;
+  }
+}
 
 async function callGroq(){
   if (!store.key){
@@ -520,7 +544,7 @@ async function callGroq(){
   }
   const messages = [{ role: 'system', content: systemPrompt() }, ...convo];
 
-  const res = await fetch(GROQ_URL, {
+  const res = await fetchWithRetry(GROQ_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -557,7 +581,7 @@ async function callGroq(){
 }
 
 async function callGroqWithModel(messages, model){
-  const res = await fetch(GROQ_URL, {
+  const res = await fetchWithRetry(GROQ_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -866,8 +890,9 @@ async function startSession(){
       const capped = pushAssistantReply(reply);
       speak(capped);
     }catch(err){
-      statusEl.textContent = err.message;
-      setAiCaption('⚠ ' + err.message);
+      const msg = friendlyError(err);
+      statusEl.textContent = msg;
+      setAiCaption('⚠ ' + msg);
       sessionActive = false;
       setState('idle');
     }
