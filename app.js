@@ -11,7 +11,7 @@ const store = {
   set rate(v){ localStorage.setItem('rate', v); },
   get pauseMs(){ return parseInt(localStorage.getItem('pauseMs') || '800', 10); },
   set pauseMs(v){ localStorage.setItem('pauseMs', v); },
-  get keepAwake(){ return localStorage.getItem('keepAwake') === 'true'; }, // default off
+  get keepAwake(){ return localStorage.getItem('keepAwake') !== 'false'; }, // default on
   set keepAwake(v){ localStorage.setItem('keepAwake', v); },
   get lipDetectEnabled(){ return localStorage.getItem('lipDetectEnabled') !== 'false'; }, // default on
   set lipDetectEnabled(v){ localStorage.setItem('lipDetectEnabled', v); },
@@ -360,6 +360,12 @@ function setState(s){
   statusEl.textContent = statusText[s] || '';
 }
 
+// How long to wait for a continuation before deciding a barge-in was a
+// false alarm and letting the AI resume — deliberately independent of
+// the (now much shorter) fast conversational pause setting, so a normal
+// breath mid-sentence doesn't trigger a premature resume.
+const RESUME_GRACE_MS = 2500;
+
 function listen(resumeCallback){
   if (!sessionActive) return;
 
@@ -425,7 +431,7 @@ function listen(resumeCallback){
     const silentFor = Date.now() - lastSpeechTime;
     if (accumulated.trim() && silentFor >= silenceMs()){
       finalizeUtterance();
-    } else if (resumeCallback && !accumulated.trim() && Date.now() - listenStartTime >= store.pauseMs){
+    } else if (resumeCallback && !accumulated.trim() && Date.now() - listenStartTime >= RESUME_GRACE_MS){
       giveUpAndResume();
     }
   }, 150);

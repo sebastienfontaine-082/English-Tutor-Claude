@@ -162,14 +162,8 @@ html, body{
 }
 
 .dbgLine{
-  color: #ffffff;
-  font-weight: 700;
-  font-size: 19px;
-  line-height: 1.3;
-  text-align: center;
-  text-shadow: 0 1px 3px rgba(0,0,0,0.6);
+  display: none;
 }
-.dbgPhase{ font-size: 21px; }
 
 .camRow{
   display: flex;
