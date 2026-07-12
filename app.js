@@ -75,7 +75,6 @@ loadHistory();
 
 const mainBtn = document.getElementById('mainBtn');
 const btnLabel = document.getElementById('btnLabel');
-const statusEl = document.getElementById('status');
 const dbgPhaseEl = document.getElementById('dbgPhase');
 const dbgHeuristicEl = document.getElementById('dbgHeuristic');
 const aiCaptionEl = document.getElementById('aiCaption');
@@ -213,7 +212,7 @@ resetConvoBtn.addEventListener('click', () => {
   saveHistory();
   setAiCaption('');
   setUserCaption('');
-  statusEl.textContent = 'Conversation reset';
+  setButtonMessage('Reset');
 });
 
 let cachedVoices = [];
@@ -234,7 +233,7 @@ populateVoices();
 
 /* First run: force settings open if no key saved */
 if (!store.key){
-  statusEl.textContent = 'Add your free Groq key first';
+  setButtonMessage('Add API key');
 }
 
 /* ---------- Orb visualizer ---------- */
@@ -337,27 +336,29 @@ function buildRecognition(){
 // If it looks finished, we finalize sooner — barge-in is the safety net
 // that recovers gracefully on the rarer cases where that guess is wrong.
 function silenceMs(){
-  // The setting is now itself the fast/default path — we only stretch it
-  // out when a signal clearly suggests the sentence is still going.
-  const base = store.pauseMs;
-  if (lipState === 'moving') return Math.max(base, 4000);
-  if (lipState !== 'still' && lastSemanticState === 'incomplete') return Math.max(base, 4000);
-  return base;
+  const fast = store.pauseMs;
+  if (lipState === 'moving') return 4000;                 // confirmed still talking
+  if (lipState === 'still') return fast;                  // confirmed done — lips are the strongest signal
+  // No face, or lips didn't help — fall back to the word heuristic.
+  if (lastSemanticState === 'incomplete') return 4000;     // confirmed still talking
+  if (lastSemanticState === 'complete') return fast;       // confirmed done
+  return 1800;                                             // genuinely uncertain — don't rush
 }
 
 function setState(s){
   vizState = s;
   mainBtn.classList.remove('listening','thinking','speaking');
+  mainBtn.classList.remove('longMsg');
   if (s !== 'idle') mainBtn.classList.add(s);
   const labels = { idle: 'TALK', listening: 'LISTENING', thinking: '···', speaking: 'SPEAKING' };
   btnLabel.textContent = labels[s] || 'TALK';
-  const statusText = {
-    idle: '',
-    listening: 'Listening… speak naturally',
-    thinking: 'Thinking…',
-    speaking: 'Speaking…',
-  };
-  statusEl.textContent = statusText[s] || '';
+}
+
+// For anything longer than a short state word (errors, notices) — shown
+// inside the button itself, with smaller wrapping text.
+function setButtonMessage(text){
+  btnLabel.textContent = text;
+  mainBtn.classList.toggle('longMsg', text.length > 10);
 }
 
 // How long to wait for a continuation before deciding a barge-in was a
@@ -374,6 +375,7 @@ function listen(resumeCallback){
   const listenStartTime = Date.now();
   let finalized = false;
   let watchdogTimer = null;
+  mouthBuffer = []; // fresh start — don't judge this turn on stale samples from before
 
   setUserCaption('');
   setActiveZone('user');
@@ -463,7 +465,7 @@ function listen(resumeCallback){
 
     recognition.onerror = (e) => {
       if (e.error === 'not-allowed' || e.error === 'service-not-allowed'){
-        statusEl.textContent = 'Microphone access denied';
+        setButtonMessage('Mic blocked');
         endSession();
         return;
       }
@@ -541,7 +543,7 @@ async function handleUserUtterance(text){
   }catch(err){
     console.error(err);
     const msg = friendlyError(err);
-    statusEl.textContent = msg;
+    setButtonMessage(msg);
     setAiCaption('⚠ ' + msg);
     setActiveZone('ai');
     setState('idle');
@@ -829,6 +831,7 @@ async function speak(text){
   setActiveZone('ai');
   setAiCaption('');
   setPhase('AI speaking…');
+  mouthBuffer = []; // avoid stale movement from the user's last turn causing an instant false barge-in
 
   let spokenChars = 0;
   let bargeTriggered = false;
@@ -940,7 +943,7 @@ async function startSession(){
     return;
   }
   if (!SR){
-    statusEl.textContent = 'Speech recognition not supported on this browser';
+    setButtonMessage('No speech support');
     return;
   }
   try{
@@ -950,7 +953,7 @@ async function startSession(){
     const permStream = await navigator.mediaDevices.getUserMedia({ audio: true });
     permStream.getTracks().forEach(t => t.stop());
   }catch(e){
-    statusEl.textContent = 'Microphone access denied';
+    setButtonMessage('Mic blocked');
     return;
   }
 
@@ -967,7 +970,7 @@ async function startSession(){
       speak(capped);
     }catch(err){
       const msg = friendlyError(err);
-      statusEl.textContent = msg;
+      setButtonMessage(msg);
       setAiCaption('⚠ ' + msg);
       sessionActive = false;
       setState('idle');
@@ -981,12 +984,15 @@ async function startSession(){
 
 let pausedForOffline = false;
 
+let offlineMessageShown = false;
 function setOfflineUI(offline){
   mainBtn.classList.toggle('offline', offline);
   if (offline){
-    statusEl.textContent = 'Network hiccup — check your connection and tap TALK to try again';
-  } else if (statusEl.textContent.startsWith('Network hiccup')){
-    statusEl.textContent = '';
+    setButtonMessage('Offline — tap to retry');
+    offlineMessageShown = true;
+  } else if (offlineMessageShown){
+    offlineMessageShown = false;
+    setState(vizState); // restore the normal short label
   }
 }
 
