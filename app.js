@@ -132,10 +132,28 @@ let semanticCheckTimer = null;
 // commonly and correctly end a complete English sentence ("I like it.",
 // "I know that.") and would otherwise cause false "incomplete" reads.
 const CONTINUATION_ENDERS = new Set([
+  // Articles / conjunctions
   'a','an','the','and','or','but','so','because','if','when','while','although',
+  'unless','until','since','though','whereas','whether','before','after','once',
+  'nor','yet','either','neither',
+  // Prepositions
   'to','of','in','on','at','for','with','from','by','about','as','which','who',
-  'is','are','was','were','am','be','been','being','i','you','he','she','we','they',
-  'my','your','his','her','its','our','their','um','uh','er','like','than','then','not',
+  'into','onto','over','under','between','among','through','during','without',
+  'within','against','toward','towards','upon','across','behind','beyond',
+  'beside','along','around','above','below','near','off','up','down','out',
+  // Auxiliary / modal verbs
+  'is','are','was','were','am','be','been','being','do','does','did',
+  'have','has','had','having','can','could','will','would','shall','should',
+  'may','might','must',
+  // Subject pronouns
+  'i','you','he','she','we','they',
+  // Possessives
+  'my','your','his','her','its','our','their',
+  // Determiners / quantifiers
+  'this','these','those','some','any','no','every','each','all','both',
+  'many','much','more','most','several','few','little','other','another','such',
+  // Fillers / hesitations
+  'um','uh','er','like','than','then','not',
 ]);
 
 // Free, local, instant heuristic — no network call, so it costs nothing.
