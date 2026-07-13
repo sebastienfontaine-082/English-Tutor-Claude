@@ -9,7 +9,7 @@ const store = {
   set voiceURI(v){ localStorage.setItem('voiceURI', v); },
   get rate(){ return parseFloat(localStorage.getItem('rate') || '1'); },
   set rate(v){ localStorage.setItem('rate', v); },
-  get pauseMs(){ return parseInt(localStorage.getItem('pauseMs') || '800', 10); },
+  get pauseMs(){ return parseInt(localStorage.getItem('pauseMs') || '2200', 10); },
   set pauseMs(v){ localStorage.setItem('pauseMs', v); },
   get keepAwake(){ return localStorage.getItem('keepAwake') !== 'false'; }, // default on
   set keepAwake(v){ localStorage.setItem('keepAwake', v); },
@@ -346,22 +346,52 @@ function buildRecognition(){
   return r;
 }
 
-// How long a silence has to last before we consider the user done talking.
-// Adjustable in settings — tolerates hesitation, "uhh", searching for a word, etc.
-// Adaptive pause: the settings slider is now the "unknown/ambiguous"
-// baseline. If the free heuristic spots an obviously dangling word, we
-// wait noticeably longer (less risk of cutting a real thought short).
-// If it looks finished, we finalize sooner — barge-in is the safety net
-// that recovers gracefully on the rarer cases where that guess is wrong.
-function silenceMs(){
-  const fast = store.pauseMs;
-  if (lipState === 'moving') return 4000;                 // confirmed still talking
-  if (lipState === 'still') return fast;                  // confirmed done — lips are the strongest signal
-  // No face, or lips didn't help — fall back to the word heuristic.
-  if (lastSemanticState === 'incomplete') return 4000;     // confirmed still talking
-  if (lastSemanticState === 'complete') return fast;       // confirmed done
-  return 1800;                                             // genuinely uncertain — don't rush
+/* ================================================================
+   DIALOGUE STATE MACHINE
+   Two states: 'user_turn' (listening) and 'ai_turn' (thinking/speaking).
+
+   Rule 1 — If the user talks while the AI is talking, the AI stops
+            immediately (barge-in cancels TTS on the spot).
+   Rule 2 — If the user doesn't seem done (heuristic says unfinished,
+            or no positive "done" signal), wait SLOW_MS before the AI
+            takes the initiative to respond.
+   Rule 3 — If the AI just started answering and the user talks again
+            within BARGE_SPLIT_MS of the AI starting to speak, the AI
+            answered too soon: stop it, discard/hold that reply, and go
+            back to user_turn, merging the continuation onto the user's
+            previous message once it arrives (or resuming the held reply
+            if nothing comes — see recoveryState below).
+   Rule 4 — If the user talks past BARGE_SPLIT_MS into the AI's answer,
+            that's a deliberate interruption: keep only what the AI
+            actually said, and let the user speak fresh (no merge).
+   Rule 5 — If the user seems done (heuristic complete, AND lips still
+            when a face is visible), wait only FAST_MS before answering.
+
+   Without a camera/face, the same rules apply using the word heuristic
+   alone in place of the lip signal.
+   ================================================================ */
+
+let dialogState = 'idle'; // 'idle' | 'user_turn' | 'ai_turn'
+
+const FAST_MS = 800;                            // rule 5 — confirmed done
+function REF_MS(){ return store.pauseMs; }      // the shared "2.2s" reference (adjustable)
+function SLOW_MS(){ return 2 * REF_MS(); }      // rule 2 — not confirmed done
+function BARGE_SPLIT_MS(){ return REF_MS(); }   // rules 3/4 boundary
+
+function userIsDoneTalking(){
+  if (lipState !== 'no-face'){
+    return lipState === 'still' && lastSemanticState === 'complete';
+  }
+  return lastSemanticState === 'complete';
 }
+function turnThresholdMs(){
+  return userIsDoneTalking() ? FAST_MS : SLOW_MS();
+}
+
+// Set only right after a rule-3 event (AI answered too soon). Lets
+// enterUserTurn's watchdog resume the AI's held reply if the user
+// genuinely says nothing within one reference window (a false alarm).
+let recoveryState = null; // { discardedReply, remainder } | null
 
 function setState(s){
   vizState = s;
@@ -379,18 +409,13 @@ function setButtonMessage(text){
   mainBtn.classList.toggle('longMsg', text.length > 10);
 }
 
-// How long to wait for a continuation before deciding a barge-in was a
-// false alarm and letting the AI resume — deliberately independent of
-// the (now much shorter) fast conversational pause setting, so a normal
-// breath mid-sentence doesn't trigger a premature resume.
-const RESUME_GRACE_MS = 2500;
-
-function listen(resumeCallback){
+function enterUserTurn(){
   if (!sessionActive) return;
+  dialogState = 'user_turn';
 
   let accumulated = '';
   let lastSpeechTime = Date.now();
-  const listenStartTime = Date.now();
+  const turnStartTime = Date.now();
   let finalized = false;
   let watchdogTimer = null;
   mouthBuffer = []; // fresh start — don't judge this turn on stale samples from before
@@ -398,61 +423,42 @@ function listen(resumeCallback){
   setUserCaption('');
   setActiveZone('user');
   setSemanticIndicator('unknown');
-  setPhase('Sentence in progress…');
+  setState('listening');
 
   function cleanupWatchdog(){
     if (watchdogTimer) clearInterval(watchdogTimer);
     watchdogTimer = null;
   }
 
-  function finalizeUtterance(){
-    if (finalized) return;
+  function finalize(text){
     finalized = true;
     cleanupWatchdog();
     if (recognition) try{ recognition.stop(); }catch(e){}
-
-    const text = accumulated.trim();
-    const thresholdUsed = silenceMs();
-    const wasLong = thresholdUsed >= 4000;
-
-    // Adaptive lip-threshold tuning: if a face is visible but we still
-    // ended up waiting the long pause repeatedly, the lip signal isn't
-    // helping — make it more sensitive. Any fast finalize resets the
-    // streak (the signal is doing its job).
-    if (lipState !== 'no-face'){
-      if (!wasLong){
-        longWaitStreak = 0;
-      } else {
-        longWaitStreak++;
-        if (longWaitStreak >= 3){
-          store.lipThreshold = Math.max(0.01, store.lipThreshold * 0.8);
-          longWaitStreak = 0;
-        }
-      }
-    }
-
-    setPhase(`Pause confirmed (${wasLong ? 'long' : 'fast'}, ${(thresholdUsed/1000).toFixed(1)}s) → sending`);
     handleUserUtterance(text);
-  }
-
-  function giveUpAndResume(){
-    if (finalized) return;
-    finalized = true;
-    cleanupWatchdog();
-    if (recognition) try{ recognition.stop(); }catch(e){}
-    resumeCallback();
   }
 
   // Checks elapsed silence on our own clock, independently of Chrome's
   // recognition cycle (which can take 1-2s to fire onend by itself —
   // far slower than a short configured pause tolerance).
   watchdogTimer = setInterval(() => {
-    if (finalized || !sessionActive || vizState !== 'listening' || pausedForOffline) return;
-    const silentFor = Date.now() - lastSpeechTime;
-    if (accumulated.trim() && silentFor >= silenceMs()){
-      finalizeUtterance();
-    } else if (resumeCallback && !accumulated.trim() && Date.now() - listenStartTime >= RESUME_GRACE_MS){
-      giveUpAndResume();
+    if (finalized || !sessionActive || dialogState !== 'user_turn' || pausedForOffline) return;
+
+    if (accumulated.trim()){
+      const silentFor = Date.now() - lastSpeechTime;
+      if (silentFor >= turnThresholdMs()){
+        finalize(accumulated.trim());
+      }
+      return;
+    }
+
+    // Nothing said at all yet. Only relevant right after a rule-3 event:
+    // give it one reference window to prove itself before concluding the
+    // barge-in was a false alarm and resuming the AI's held reply.
+    if (recoveryState && Date.now() - turnStartTime >= REF_MS()){
+      finalized = true;
+      cleanupWatchdog();
+      if (recognition) try{ recognition.stop(); }catch(e){}
+      resumeInterruptedAi();
     }
   }, 150);
 
@@ -503,7 +509,7 @@ function listen(resumeCallback){
       // The watchdog above is what actually decides when to finalize —
       // this just keeps the recognition chunks chained for as long as
       // we're still waiting.
-      if (finalized || !sessionActive || vizState !== 'listening' || pausedForOffline) return;
+      if (finalized || !sessionActive || dialogState !== 'user_turn' || pausedForOffline) return;
       startChunk();
     };
 
@@ -511,6 +517,35 @@ function listen(resumeCallback){
   }
 
   startChunk();
+}
+
+// Confirmed false alarm (rule 3 aftermath, nothing said): restore the
+// held reply and let the AI pick up right where it left off.
+function resumeInterruptedAi(){
+  const { discardedReply, remainder } = recoveryState;
+  recoveryState = null;
+  pendingMerge = false;
+
+  // This was a genuine false trigger, not a real cutoff — the lip
+  // detector (if in use) was oversensitive. Track it for auto-tuning.
+  if (lipState !== 'no-face'){
+    earlyBargeStreak++;
+    if (earlyBargeStreak >= 2){
+      store.lipThreshold = store.lipThreshold * 1.25;
+      earlyBargeStreak = 0;
+    }
+  }
+
+  if (discardedReply !== null){
+    history.push({ role: 'assistant', content: discardedReply });
+    saveHistory();
+  }
+  if (remainder){
+    speak(remainder);
+  } else {
+    setAiCaption(discardedReply || '');
+    enterUserTurn();
+  }
 }
 
 function pushAssistantReply(reply){
@@ -530,13 +565,12 @@ function friendlyError(err){
 
 async function handleUserUtterance(text){
   if (text.length > 1000) text = text.slice(0, 1000); // safety cap, avoids oversized requests
+  dialogState = 'ai_turn';
   setState('thinking');
-  setPhase('Thinking (contacting AI)…');
 
   if (pendingMerge){
-    // The app likely cut the user off mid-thought during the previous
-    // turn — fold this continuation onto their last message instead of
-    // treating it as a brand new one, so the AI sees the whole thought.
+    // Rule 3 continuation actually arrived — fold it onto the user's
+    // previous message instead of treating it as a brand new one.
     pendingMerge = false;
     if (history.length && history[history.length - 1].role === 'user'){
       history[history.length - 1].content = (history[history.length - 1].content + ' ' + text).trim();
@@ -544,7 +578,7 @@ async function handleUserUtterance(text){
       history.push({ role: 'user', content: text });
     }
   } else if (pendingInterruptionNote){
-    // The user deliberately cut the AI off — flag it so the AI reacts
+    // Rule 4 — deliberate interruption. Flag it so the AI reacts
     // naturally instead of getting confused or repeating itself.
     pendingInterruptionNote = false;
     history.push({ role: 'system', content: 'The user just cut you off mid-sentence out of enthusiasm, not rudeness — react naturally, do not apologize or make a big deal of it.' });
@@ -761,8 +795,7 @@ function ensureFaceLandmarker(){
 let camStream = null;
 let lipLoopTimer = null;
 let lipState = 'no-face'; // 'no-face' | 'still' | 'moving'
-let longWaitStreak = 0;   // consecutive turns finalized via the long pause despite a visible face
-let earlyBargeStreak = 0; // consecutive very-early (likely false-positive) barge-ins
+let earlyBargeStreak = 0; // consecutive confirmed-false-alarm barge-ins (see resumeInterruptedAi)
 let mouthBuffer = [];
 
 const MOUTH_UPPER = 13, MOUTH_LOWER = 14, MOUTH_LEFT = 61, MOUTH_RIGHT = 291;
@@ -845,15 +878,15 @@ function watchForVisualBargeIn(onTrigger){
 }
 
 async function speak(text){
+  dialogState = 'ai_turn';
+  const turnStartTime = Date.now();
   setState('speaking');
   setActiveZone('ai');
   setAiCaption('');
-  setPhase('AI speaking…');
   mouthBuffer = []; // avoid stale movement from the user's last turn causing an instant false barge-in
 
   let spokenChars = 0;
   let bargeTriggered = false;
-  const speakStart = Date.now();
   const stopWatch = watchForVisualBargeIn(() => { bargeTriggered = true; speechSynthesis.cancel(); });
 
   await speakRaw(text, (partial) => { spokenChars = partial.length; setAiCaption(partial); });
@@ -866,75 +899,36 @@ async function speak(text){
   }
 
   if (bargeTriggered){
-    const fraction = text.length ? spokenChars / text.length : 0;
-    const elapsedMs = Date.now() - speakStart;
-    handleBargeIn(text.slice(0, spokenChars).trim(), fraction, elapsedMs, text);
+    const elapsed = Date.now() - turnStartTime;
+    const spokenPortion = text.slice(0, spokenChars).trim();
+    const remainder = text.slice(spokenChars).trim();
+    setAiCaption(spokenPortion || '(interrupted)');
+
+    if (elapsed < BARGE_SPLIT_MS()){
+      // Rule 3 — the AI answered too soon. Hold the reply aside; if the
+      // continuation actually arrives it gets merged (handleUserUtterance),
+      // otherwise enterUserTurn's watchdog resumes it (resumeInterruptedAi).
+      const discardedReply = (history.length && history[history.length - 1].role === 'assistant')
+        ? history[history.length - 1].content : null;
+      if (discardedReply !== null){ history.pop(); saveHistory(); }
+      pendingMerge = true;
+      recoveryState = { discardedReply, remainder };
+    } else {
+      // Rule 4 — deliberate interruption. Keep only what was actually
+      // said, let the user speak fresh.
+      if (history.length && history[history.length - 1].role === 'assistant'){
+        history[history.length - 1].content = spokenPortion || '(cut short)';
+        saveHistory();
+      }
+      pendingInterruptionNote = true;
+    }
+
+    enterUserTurn();
     return;
   }
 
   setAiCaption(text);
-  listen();
-}
-
-// How far into the AI's reply (0–1) a barge-in still counts as "the app
-// cut the user off early, they're continuing the same thought" rather
-// than "a deliberate interruption".
-const BARGE_IN_EARLY_FRACTION = 0.25;
-
-function handleBargeIn(spokenPortion, fraction, elapsedMs, fullText){
-  setAiCaption(spokenPortion || '(interrupted)');
-
-  // Adaptive lip-threshold tuning: a barge-in firing very soon after the
-  // AI started talking is more likely a false trigger (oversensitive)
-  // than a genuine cut — if it keeps happening, make it less sensitive.
-  if (elapsedMs < 1500){
-    earlyBargeStreak++;
-    if (earlyBargeStreak >= 2){
-      store.lipThreshold = store.lipThreshold * 1.25;
-      earlyBargeStreak = 0;
-    }
-  } else {
-    earlyBargeStreak = 0;
-  }
-
-  if (fraction < BARGE_IN_EARLY_FRACTION){
-    setPhase('Barge-in: accidental cutoff detected — merging');
-    const discardedReply = (history.length && history[history.length - 1].role === 'assistant')
-      ? history[history.length - 1].content : null;
-    if (discardedReply !== null){
-      history.pop(); // discard the premature reply for now — restored below if this was a false alarm
-      saveHistory();
-    }
-    pendingMerge = true;
-
-    const remainder = fullText.slice(spokenPortion.length).trim();
-    listen(() => {
-      // No continuation came within the pause window — false alarm.
-      // The AI didn't actually get cut off; let it finish its sentence.
-      pendingMerge = false;
-      setPhase('No continuation heard — resuming AI reply');
-      if (discardedReply !== null){
-        history.push({ role: 'assistant', content: discardedReply });
-        saveHistory();
-      }
-      if (remainder){
-        speak(remainder);
-      } else {
-        setAiCaption(discardedReply || '');
-        listen();
-      }
-    });
-    return;
-  }
-
-  setPhase('Barge-in: voluntary interruption detected');
-  if (history.length && history[history.length - 1].role === 'assistant'){
-    history[history.length - 1].content = spokenPortion || '(cut short)';
-    saveHistory();
-  }
-  pendingInterruptionNote = true;
-
-  listen();
+  enterUserTurn();
 }
 
 /* ---------- Screen wake lock ---------- */
@@ -994,7 +988,7 @@ async function startSession(){
       setState('idle');
     }
   } else {
-    listen();
+    enterUserTurn();
   }
 }
 
@@ -1024,12 +1018,16 @@ window.addEventListener('online', () => {
   if (sessionActive && pausedForOffline){
     pausedForOffline = false;
     if (recognition) try{ recognition.stop(); }catch(e){}
-    listen();
+    enterUserTurn();
   }
 });
 
 function endSession(){
   sessionActive = false;
+  dialogState = 'idle';
+  recoveryState = null;
+  pendingMerge = false;
+  pendingInterruptionNote = false;
   if (recognition) try{ recognition.stop(); }catch(e){}
   speechSynthesis.cancel();
   setActiveZone(null);
@@ -1037,7 +1035,6 @@ function endSession(){
   setSemanticIndicator('unknown');
   releaseWakeLock();
   stopLipWatch();
-  setPhase('');
   setState('idle');
 }
 

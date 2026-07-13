@@ -16,7 +16,7 @@
 
   <header class="topbar">
     <span class="wordmark">talk<span class="dot">.</span></span>
-    <span id="versionTag" class="versionTag">v4.2</span>
+    <span id="versionTag" class="versionTag">v5.0</span>
     <button id="settingsBtn" class="iconBtn" aria-label="Settings">⚙</button>
   </header>
 
@@ -79,10 +79,10 @@
     </label>
 
     <label class="field row">
-      <span>Pause tolerance — fast path (stretched automatically if you're still talking)</span>
-      <input id="pauseInput" type="range" min="400" max="3000" step="100" value="800">
+      <span>Reference pause (used for "still thinking" wait and barge-in timing)</span>
+      <input id="pauseInput" type="range" min="1200" max="3500" step="100" value="2200">
     </label>
-    <p class="hint" id="pauseHint">0.8s</p>
+    <p class="hint" id="pauseHint">2.2s</p>
 
     <label class="field row">
       <span>Keep screen on while talking</span>
