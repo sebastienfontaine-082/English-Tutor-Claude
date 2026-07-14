@@ -421,7 +421,14 @@ function enterUserTurn(){
   mouthBuffer = []; // fresh start — don't judge this turn on stale samples from before
   lipState = 'no-face'; // ...and don't carry over the previous turn's conclusion either
 
-  setUserCaption('');
+  // If we're recovering from an early AI barge-in (rule 3), keep showing
+  // the user's first fragment on screen instead of going blank — the
+  // continuation gets displayed alongside it, then merged for real once
+  // finalized (see handleUserUtterance).
+  const mergePrefix = (pendingMerge && history.length && history[history.length - 1].role === 'user')
+    ? history[history.length - 1].content : '';
+
+  setUserCaption(mergePrefix);
   setActiveZone('user');
   setSemanticIndicator('unknown');
   setState('listening');
@@ -479,11 +486,11 @@ function enterUserTurn(){
 
       if (last.isFinal){
         if (t.trim()) accumulated = (accumulated + ' ' + t).trim();
-        setUserCaption(accumulated);
+        setUserCaption((mergePrefix + ' ' + accumulated).trim());
         scheduleSemanticCheck(accumulated);
       } else {
         const combined = (accumulated + ' ' + t).trim();
-        setUserCaption(combined);
+        setUserCaption((mergePrefix + ' ' + combined).trim());
         scheduleSemanticCheck(combined);
       }
     };
@@ -867,8 +874,11 @@ function stopLipWatch(){
 function watchForVisualBargeIn(onTrigger){
   if (!store.lipDetectEnabled) return () => {};
   let stopped = false;
+  const startTime = Date.now();
+  const GRACE_MS = 400; // let the AI actually start talking, and the visual signal settle
   const iv = setInterval(() => {
     if (stopped) return;
+    if (Date.now() - startTime < GRACE_MS) return;
     if (lipState === 'moving'){
       stopped = true;
       clearInterval(iv);
