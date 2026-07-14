@@ -419,6 +419,7 @@ function enterUserTurn(){
   let finalized = false;
   let watchdogTimer = null;
   mouthBuffer = []; // fresh start — don't judge this turn on stale samples from before
+  lipState = 'no-face'; // ...and don't carry over the previous turn's conclusion either
 
   setUserCaption('');
   setActiveZone('user');
@@ -842,13 +843,13 @@ async function startLipWatch(){
     mouthBuffer.push({ t: now, v: mouthOpen });
     mouthBuffer = mouthBuffer.filter(s => now - s.t <= BUFFER_MS);
 
-    if (mouthBuffer.length >= 3){
+    if (mouthBuffer.length >= 2){
       const vals = mouthBuffer.map(s => s.v);
       const range = Math.max(...vals) - Math.min(...vals);
       lipState = range > store.lipThreshold ? 'moving' : 'still';
       lipReadoutEl.textContent = `${range.toFixed(3)} / thr ${store.lipThreshold.toFixed(3)} — ${lipState}`;
     }
-  }, 100); // ~10Hz — plenty for mouth movement, easy on battery
+  }, 80); // ~12.5Hz — a bit snappier, still easy on battery
 }
 
 function stopLipWatch(){
@@ -873,7 +874,7 @@ function watchForVisualBargeIn(onTrigger){
       clearInterval(iv);
       onTrigger();
     }
-  }, 150);
+  }, 80);
   return () => { stopped = true; clearInterval(iv); };
 }
 
@@ -884,6 +885,7 @@ async function speak(text){
   setActiveZone('ai');
   setAiCaption('');
   mouthBuffer = []; // avoid stale movement from the user's last turn causing an instant false barge-in
+  lipState = 'no-face'; // ...and don't carry over the previous turn's conclusion either
 
   let spokenChars = 0;
   let bargeTriggered = false;
