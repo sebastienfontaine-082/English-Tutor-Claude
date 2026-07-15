@@ -373,7 +373,7 @@ function buildRecognition(){
 
 let dialogState = 'idle'; // 'idle' | 'user_turn' | 'ai_turn'
 
-const FAST_MS = 800;                            // rule 5 — confirmed done
+const FAST_MS = 1100;                           // rule 5 — confirmed done (includes margin for recognition chunk-transition gaps)
 function REF_MS(){ return store.pauseMs; }      // the shared "2.2s" reference (adjustable)
 function SLOW_MS(){ return 2 * REF_MS(); }      // rule 2 — not confirmed done
 function BARGE_SPLIT_MS(){ return REF_MS(); }   // rules 3/4 boundary
@@ -448,16 +448,23 @@ function enterUserTurn(){
   // Checks elapsed silence on our own clock, independently of Chrome's
   // recognition cycle (which can take 1-2s to fire onend by itself —
   // far slower than a short configured pause tolerance).
+  let confirmTicks = 0;
   watchdogTimer = setInterval(() => {
     if (finalized || !sessionActive || dialogState !== 'user_turn' || pausedForOffline) return;
 
     if (accumulated.trim()){
       const silentFor = Date.now() - lastSpeechTime;
       if (silentFor >= turnThresholdMs()){
-        finalize(accumulated.trim());
+        confirmTicks++;
+        if (confirmTicks >= 2){ // ~150ms of sustained confirmation, not a single noisy reading
+          finalize(accumulated.trim());
+        }
+      } else {
+        confirmTicks = 0;
       }
       return;
     }
+    confirmTicks = 0;
 
     // Nothing said at all yet. Only relevant right after a rule-3 event:
     // give it one reference window to prove itself before concluding the
@@ -539,7 +546,7 @@ function resumeInterruptedAi(){
   if (lipState !== 'no-face'){
     earlyBargeStreak++;
     if (earlyBargeStreak >= 2){
-      store.lipThreshold = store.lipThreshold * 1.25;
+      store.lipThreshold = Math.min(0.15, store.lipThreshold * 1.25);
       earlyBargeStreak = 0;
     }
   }
