@@ -21,8 +21,8 @@ const store = {
   set charsPerSecondBase(v){ localStorage.setItem('cpsBase', v); },
   // Self-tuning lip-movement sensitivity threshold — adjusted based on
   // how often the video signal actually helps vs. false-triggers.
-  get lipThreshold(){ return parseFloat(localStorage.getItem('lipThresholdV2') || '0.06'); },
-  set lipThreshold(v){ localStorage.setItem('lipThresholdV2', v); },
+  get lipThreshold(){ return parseFloat(localStorage.getItem('lipThresholdV3') || '0.05'); },
+  set lipThreshold(v){ localStorage.setItem('lipThresholdV3', v); },
 };
 
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
@@ -442,29 +442,31 @@ function enterUserTurn(){
     finalized = true;
     cleanupWatchdog();
     if (recognition) try{ recognition.stop(); }catch(e){}
+
+    if (lipState !== 'no-face'){
+      turnsSinceThresholdRaise++;
+      if (turnsSinceThresholdRaise >= 5){
+        store.lipThreshold = Math.max(0.02, store.lipThreshold * 0.95);
+        turnsSinceThresholdRaise = 0;
+      }
+    }
+
     handleUserUtterance(text);
   }
 
   // Checks elapsed silence on our own clock, independently of Chrome's
   // recognition cycle (which can take 1-2s to fire onend by itself —
   // far slower than a short configured pause tolerance).
-  let confirmTicks = 0;
   watchdogTimer = setInterval(() => {
     if (finalized || !sessionActive || dialogState !== 'user_turn' || pausedForOffline) return;
 
     if (accumulated.trim()){
       const silentFor = Date.now() - lastSpeechTime;
       if (silentFor >= turnThresholdMs()){
-        confirmTicks++;
-        if (confirmTicks >= 2){ // ~150ms of sustained confirmation, not a single noisy reading
-          finalize(accumulated.trim());
-        }
-      } else {
-        confirmTicks = 0;
+        finalize(accumulated.trim());
       }
       return;
     }
-    confirmTicks = 0;
 
     // Nothing said at all yet. Only relevant right after a rule-3 event:
     // give it one reference window to prove itself before concluding the
@@ -548,6 +550,7 @@ function resumeInterruptedAi(){
     if (earlyBargeStreak >= 2){
       store.lipThreshold = Math.min(0.15, store.lipThreshold * 1.25);
       earlyBargeStreak = 0;
+      turnsSinceThresholdRaise = 0;
     }
   }
 
@@ -811,6 +814,7 @@ let camStream = null;
 let lipLoopTimer = null;
 let lipState = 'no-face'; // 'no-face' | 'still' | 'moving'
 let earlyBargeStreak = 0; // consecutive confirmed-false-alarm barge-ins (see resumeInterruptedAi)
+let turnsSinceThresholdRaise = 0; // gently relaxes sensitivity back down if raises aren't needed for a while
 let mouthBuffer = [];
 
 const MOUTH_UPPER = 13, MOUTH_LOWER = 14, MOUTH_LEFT = 61, MOUTH_RIGHT = 291;
