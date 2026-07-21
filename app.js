@@ -21,8 +21,8 @@ const store = {
   set charsPerSecondBase(v){ localStorage.setItem('cpsBase', v); },
   // Self-tuning lip-movement sensitivity threshold — adjusted based on
   // how often the video signal actually helps vs. false-triggers.
-  get lipThreshold(){ return parseFloat(localStorage.getItem('lipThresholdV3') || '0.05'); },
-  set lipThreshold(v){ localStorage.setItem('lipThresholdV3', v); },
+  get lipThreshold(){ return parseFloat(localStorage.getItem('lipThresholdV4') || '0.03'); },
+  set lipThreshold(v){ localStorage.setItem('lipThresholdV4', v); },
 };
 
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
@@ -548,7 +548,7 @@ function resumeInterruptedAi(){
   if (lipState !== 'no-face'){
     earlyBargeStreak++;
     if (earlyBargeStreak >= 2){
-      store.lipThreshold = Math.min(0.15, store.lipThreshold * 1.25);
+      store.lipThreshold = Math.min(0.08, store.lipThreshold * 1.25);
       earlyBargeStreak = 0;
       turnsSinceThresholdRaise = 0;
     }
