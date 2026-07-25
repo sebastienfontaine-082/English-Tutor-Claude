@@ -13,8 +13,8 @@ const store = {
   set pauseMs(v){ localStorage.setItem('pauseMs', v); },
   get keepAwake(){ return localStorage.getItem('keepAwake') !== 'false'; }, // default on
   set keepAwake(v){ localStorage.setItem('keepAwake', v); },
-  get lipDetectEnabled(){ return localStorage.getItem('lipDetectEnabled') !== 'false'; }, // default on
-  set lipDetectEnabled(v){ localStorage.setItem('lipDetectEnabled', v); },
+  get lipDetectEnabled(){ return localStorage.getItem('lipDetectEnabledV2') === 'true'; }, // default off — testing audio-based barge-in instead
+  set lipDetectEnabled(v){ localStorage.setItem('lipDetectEnabledV2', v); },
   // Learned speaking rate, normalized to rate=1 — refined after every
   // utterance so the reveal speed adapts to the real device/voice.
   get charsPerSecondBase(){ return parseFloat(localStorage.getItem('cpsBase') || '15'); },
@@ -899,6 +899,39 @@ function watchForVisualBargeIn(onTrigger){
   return () => { stopped = true; clearInterval(iv); };
 }
 
+// EXPERIMENTAL — alternative to the visual watcher: runs an actual
+// SpeechRecognition session (not just a raw volume sensor) while the AI
+// is talking, to test whether real recognition avoids the choppy-audio
+// issue any better than a plain getUserMedia analyser did. Very likely
+// it won't (recognition also needs mic capture under the hood), but
+// worth confirming directly rather than assuming.
+function watchForAudioBargeIn(onTrigger){
+  if (!SR) return () => {};
+  let stopped = false;
+  let rec = null;
+
+  function startRec(){
+    if (stopped) return;
+    rec = buildRecognition();
+    rec.continuous = true;
+    rec.onresult = (e) => {
+      if (stopped) return;
+      const last = e.results[e.results.length - 1];
+      if (last[0].transcript.trim()){
+        stopped = true;
+        try{ rec.stop(); }catch(err){}
+        onTrigger();
+      }
+    };
+    rec.onerror = () => { /* ignore — experimental, just keep trying */ };
+    rec.onend = () => { if (!stopped) startRec(); };
+    try{ rec.start(); }catch(err){}
+  }
+  startRec();
+
+  return () => { stopped = true; if (rec) try{ rec.stop(); }catch(err){} };
+}
+
 async function speak(text){
   dialogState = 'ai_turn';
   const turnStartTime = Date.now();
@@ -910,7 +943,9 @@ async function speak(text){
 
   let spokenChars = 0;
   let bargeTriggered = false;
-  const stopWatch = watchForVisualBargeIn(() => { bargeTriggered = true; speechSynthesis.cancel(); });
+  const stopWatch = store.lipDetectEnabled
+    ? watchForVisualBargeIn(() => { bargeTriggered = true; speechSynthesis.cancel(); })
+    : watchForAudioBargeIn(() => { bargeTriggered = true; speechSynthesis.cancel(); });
 
   await speakRaw(text, (partial) => { spokenChars = partial.length; setAiCaption(partial); });
 
